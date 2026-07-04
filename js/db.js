@@ -5,7 +5,7 @@ import { emit, state } from "./state.js";
 import { EXERCISE_SEED } from "./seed/exercises.js";
 
 const DB_NAME = "fitsync";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const STORES = [
   "profile",
@@ -21,6 +21,7 @@ const STORES = [
   "meal_templates",
   "recipes",
   "recipe_images",
+  "aisle_overrides",
 ];
 
 let dbPromise;
@@ -62,6 +63,9 @@ function getDB() {
         }
         if (!db.objectStoreNames.contains("recipe_images")) {
           db.createObjectStore("recipe_images", { keyPath: "id" }).createIndex("recipeId", "recipeId");
+        }
+        if (!db.objectStoreNames.contains("aisle_overrides")) {
+          db.createObjectStore("aisle_overrides", { keyPath: "name" });
         }
       },
     });
@@ -426,6 +430,22 @@ export async function migrateMealTemplatesToRecipes() {
     });
   }
   await saveSettings({ recipesMigrated: true });
+}
+
+// ---- Aisle overrides (learned corrections for grocery-list categorization) ----
+// Keyed by the lowercased ingredient/grocery-item name itself rather than a
+// uuid, since there's exactly one override per name and this makes lookups
+// a single get() instead of a scan.
+export async function listAisleOverrides() {
+  return listRecords("aisle_overrides");
+}
+
+export async function setAisleOverride(name, aisle) {
+  const key = (name || "").trim().toLowerCase();
+  if (!key) return null;
+  const stamped = await putRecord("aisle_overrides", { name: key, aisle });
+  emit("aisle_overrides:changed", stamped);
+  return stamped;
 }
 
 // ---- AI audit log (ai_events) ----

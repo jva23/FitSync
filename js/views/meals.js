@@ -1,7 +1,12 @@
-// Weekly meal planning: macro targets, per-day meals with batch-cook tagging,
-// and a manual grocery list. Actual eating/logging happens on Today.
-import { getMealPlanByWeek, saveMealPlan, listMealTemplates, saveMealTemplate, deleteMealTemplate } from "../db.js";
-import { mondayOf, weekISOFromMonday, weekDays, formatWeekLabel, formatDayLabel, addDaysStr, todayLocalDate } from "../utils.js";
+// Weekly meal planning: macro targets, per-day meals (manual or pulled from
+// the recipe library with auto-computed macros), batch-cook tagging, and a
+// consolidated, aisle-grouped grocery list. Actual eating/logging happens on
+// Today.
+import { saveMealPlan, listMealTemplates, saveMealTemplate, deleteMealTemplate, listRecipes, listAisleOverrides } from "../db.js";
+import { mondayOf, weekISOFromMonday, formatWeekLabel, formatDayLabel, addDaysStr, todayLocalDate, escapeHtml } from "../utils.js";
+import { loadOrCreateMealPlan } from "../meal-plan-helpers.js";
+import { overridesToMap } from "../aisle.js";
+import { buildGroceryCard } from "../grocery-ui.js";
 import { showToast } from "../toast.js";
 import { downloadRecipeHtml } from "../recipe-export.js";
 
@@ -9,34 +14,13 @@ const PREP_METHODS = ["grill", "smoker", "stove", "oven", "none"];
 
 export async function render(container) {
   let weekStart = mondayOf(todayLocalDate());
-  let plan = await loadOrCreatePlan(weekStart);
+  let plan = await loadOrCreateMealPlan(weekStart);
   let templates = await listMealTemplates();
+  let allRecipes = await listRecipes();
+  const aisleOverrides = overridesToMap(await listAisleOverrides());
   let openAddDate = null;
 
   paint();
-
-  async function loadOrCreatePlan(monday) {
-    const weekISO = weekISOFromMonday(monday);
-    const existing = await getMealPlanByWeek(weekISO);
-    if (existing) return backfillDays(existing, monday);
-    return {
-      weekISO,
-      targets: { kcal: 2200, protein: 180, carbs: 200, fat: 70 },
-      days: weekDays(monday).map((date) => ({ date, meals: [] })),
-      groceryList: [],
-      generatedBy: "manual",
-      aiRationale: "",
-    };
-  }
-
-  // AI actions can create a plan doc with a partial/empty `days` array (e.g.
-  // adjust_macro_targets on a brand-new week). Backfill any missing dates so
-  // the view always has all 7 day cards.
-  function backfillDays(plan, monday) {
-    const byDate = new Map(plan.days.map((d) => [d.date, d]));
-    plan.days = weekDays(monday).map((date) => byDate.get(date) || { date, meals: [] });
-    return plan;
-  }
 
   async function persist() {
     plan = await saveMealPlan(plan);
@@ -44,7 +28,7 @@ export async function render(container) {
 
   async function changeWeek(deltaDays) {
     weekStart = addDaysStr(weekStart, deltaDays);
-    plan = await loadOrCreatePlan(weekStart);
+    plan = await loadOrCreateMealPlan(weekStart);
     openAddDate = null;
     paint();
   }
@@ -59,7 +43,7 @@ export async function render(container) {
     for (const day of plan.days) {
       container.appendChild(dayCard(day));
     }
-    container.appendChild(groceryCard());
+    container.appendChild(buildGroceryCard(plan, persist, aisleOverrides));
   }
 
   function recipeLibraryLink() {
@@ -123,7 +107,7 @@ export async function render(container) {
     for (const tpl of templates) {
       const row = document.createElement("div");
       row.className = "row between";
-      row.innerHTML = `<span>${tpl.name} <span class="hint">${tpl.macros.kcal} kcal</span></span>`;
+      row.innerHTML = `<span>${escapeHtml(tpl.name)} <span class="hint">${tpl.macros.kcal} kcal</span></span>`;
       const del = document.createElement("button");
       del.className = "btn sm ghost";
       del.textContent = "Delete";
@@ -174,19 +158,22 @@ export async function render(container) {
       const row = document.createElement("div");
       row.className = "card";
       row.style.background = "var(--bg-elevated)";
+      const recipe = meal.recipeId ? allRecipes.find((r) => r.id === meal.recipeId) : null;
       row.innerHTML = `
         <div class="row between">
-          <strong>${meal.name}</strong>
+          <strong>${escapeHtml(meal.name)}</strong>
           <button class="btn sm ghost remove-meal">Remove</button>
         </div>
-        ${meal.description ? `<p>${meal.description}</p>` : ""}
+        ${meal.description ? `<p>${escapeHtml(meal.description)}</p>` : ""}
+        ${recipe ? `<p class="hint">From recipe: ${escapeHtml(recipe.title)} · ${meal.servings || recipe.baseServings} serving${(meal.servings || recipe.baseServings) === 1 ? "" : "s"}</p>` : ""}
         <div class="row wrap">
           <span class="badge">${meal.macros.kcal} kcal</span>
           <span class="badge">${meal.macros.protein}g protein</span>
-          ${meal.prepMethod && meal.prepMethod !== "none" ? `<span class="badge">${meal.prepMethod}</span>` : ""}
-          ${meal.batchTag ? `<span class="badge success">${meal.batchTag}</span>` : ""}
+          ${meal.prepMethod && meal.prepMethod !== "none" ? `<span class="badge">${escapeHtml(meal.prepMethod)}</span>` : ""}
+          ${meal.batchTag ? `<span class="badge success">${escapeHtml(meal.batchTag)}</span>` : ""}
         </div>
         <div class="row wrap" style="margin-top:8px;">
+          ${recipe ? `<button class="btn sm ghost open-recipe">Open recipe</button>` : ""}
           <button class="btn sm ghost save-template">Save as template</button>
           <button class="btn sm ghost export-recipe">Export recipe (HTML)</button>
         </div>
@@ -196,6 +183,10 @@ export async function render(container) {
         await persist();
         paint();
       });
+      const openRecipeBtn = row.querySelector(".open-recipe");
+      if (openRecipeBtn) {
+        openRecipeBtn.addEventListener("click", () => (location.hash = `#/recipe/${meal.recipeId}`));
+      }
       row.querySelector(".save-template").addEventListener("click", async () => {
         await saveMealTemplate({
           name: meal.name,
@@ -228,6 +219,19 @@ export async function render(container) {
     wrap.className = "card stack";
     wrap.style.background = "var(--bg-input)";
     wrap.innerHTML = `
+      ${allRecipes.length ? `
+      <div class="field">
+        <label>From your recipes</label>
+        <div class="row wrap">
+          <select class="m-recipe" style="flex:2;min-width:160px;">
+            <option value="">Choose a recipe…</option>
+          </select>
+          <input type="number" class="m-recipe-servings" placeholder="servings" style="flex:1;min-width:80px;" value="1" min="1" />
+        </div>
+        <input type="text" class="m-recipe-batch" placeholder="Batch tag (optional) — same tag on another day = cooked once" />
+        <button class="btn sm" id="add-from-recipe">Add</button>
+      </div>
+      <hr />` : ""}
       ${templates.length ? `<div class="field"><label>Templates</label><div class="row wrap template-chips"></div></div>` : ""}
       <div class="field"><label>Name</label><input type="text" class="m-name" placeholder="e.g. Smoked pork shoulder tacos" /></div>
       <div class="field"><label>Description</label><textarea class="m-desc"></textarea></div>
@@ -245,6 +249,42 @@ export async function render(container) {
       <button class="btn primary" id="save-meal">Add to day</button>
     `;
     let prepMethod = "none";
+
+    const recipeSelect = wrap.querySelector(".m-recipe");
+    if (recipeSelect) {
+      for (const r of allRecipes) {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = r.title;
+        recipeSelect.appendChild(opt);
+      }
+      wrap.querySelector("#add-from-recipe").addEventListener("click", async () => {
+        const recipeId = recipeSelect.value;
+        if (!recipeId) return;
+        const recipe = allRecipes.find((r) => r.id === recipeId);
+        if (!recipe) return;
+        const servings = Number(wrap.querySelector(".m-recipe-servings").value) || recipe.baseServings || 1;
+        const n = recipe.nutritionPerServing || {};
+        day.meals.push({
+          name: recipe.title,
+          description: recipe.description || "",
+          recipeId: recipe.id,
+          servings,
+          macros: {
+            kcal: Math.round((n.kcal || 0) * servings),
+            protein: Math.round((n.protein || 0) * servings),
+            carbs: Math.round((n.carbs || 0) * servings),
+            fat: Math.round((n.fat || 0) * servings),
+          },
+          prepMethod: recipe.prepMethod || "none",
+          batchTag: wrap.querySelector(".m-recipe-batch").value.trim(),
+        });
+        await persist();
+        openAddDate = null;
+        paint();
+        showToast(`${recipe.title} added — macros filled in automatically`, { type: "success" });
+      });
+    }
 
     const templateChipsWrap = wrap.querySelector(".template-chips");
     if (templateChipsWrap) {
@@ -299,45 +339,6 @@ export async function render(container) {
       });
       await persist();
       openAddDate = null;
-      paint();
-    });
-    return wrap;
-  }
-
-  function groceryCard() {
-    const wrap = document.createElement("div");
-    wrap.className = "card stack";
-    wrap.innerHTML = `
-      <div class="section-title">Grocery list</div>
-      <div class="stack" id="grocery-list"></div>
-      <div class="row">
-        <input type="text" id="grocery-item" placeholder="Add item" style="flex:1;" />
-        <button class="btn sm" id="grocery-add">Add</button>
-      </div>
-    `;
-    const list = wrap.querySelector("#grocery-list");
-    if (plan.groceryList.length === 0) list.innerHTML = `<p class="hint">Nothing added yet.</p>`;
-    plan.groceryList.forEach((item, i) => {
-      const row = document.createElement("div");
-      row.className = "row between";
-      row.innerHTML = `<span>${item}</span>`;
-      const del = document.createElement("button");
-      del.className = "btn sm ghost";
-      del.textContent = "Remove";
-      del.addEventListener("click", async () => {
-        plan.groceryList.splice(i, 1);
-        await persist();
-        paint();
-      });
-      row.appendChild(del);
-      list.appendChild(row);
-    });
-    wrap.querySelector("#grocery-add").addEventListener("click", async () => {
-      const input = wrap.querySelector("#grocery-item");
-      const value = input.value.trim();
-      if (!value) return;
-      plan.groceryList.push(value);
-      await persist();
       paint();
     });
     return wrap;

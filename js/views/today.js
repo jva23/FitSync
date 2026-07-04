@@ -7,9 +7,10 @@ import {
   saveMealLog,
   listMealTemplates,
   saveMealTemplate,
+  listRecipes,
 } from "../db.js";
 import { showToast } from "../toast.js";
-import { kgToLb, mondayOf, weekISOFromMonday, todayLocalDate, ozToMl, mlToOz } from "../utils.js";
+import { kgToLb, mondayOf, weekISOFromMonday, todayLocalDate, ozToMl, mlToOz, escapeHtml } from "../utils.js";
 import { estimateMealMacros, AiError } from "../ai.js";
 import { validateActions, applyActions } from "../ai-actions.js";
 
@@ -25,6 +26,7 @@ export async function render(container) {
 
   let mealLog = (await getMealLogByDate(date)) || { date, meals: [], water: 0 };
   const templates = await listMealTemplates();
+  const allRecipes = await listRecipes();
 
   container.innerHTML = "";
   container.appendChild(profileCard());
@@ -197,7 +199,7 @@ export async function render(container) {
     const targets = mealPlan?.targets;
     wrap.innerHTML = `
       <div class="section-title">Today's meals</div>
-      ${plannedMeals?.meals?.length ? `<p class="hint">Planned: ${plannedMeals.meals.map((m) => m.name).join(", ")}</p>` : ""}
+      ${plannedMeals?.meals?.length ? `<p class="hint">Planned: ${escapeHtml(plannedMeals.meals.map((m) => m.name).join(", "))}</p>` : ""}
       <div class="stack" id="meal-list"></div>
       <p class="num">${Math.round(totals.kcal)} kcal${targets ? ` / ${targets.kcal}` : ""} · ${Math.round(totals.protein)}g protein${targets ? ` / ${targets.protein}g` : ""}</p>
       <div class="field">
@@ -206,6 +208,16 @@ export async function render(container) {
       </div>
       <button class="btn primary block" id="nl-estimate">Estimate with AI</button>
       <div id="nl-result"></div>
+      ${allRecipes.length ? `
+      <hr />
+      <div class="section-title" style="margin-top:0;">Or log from a recipe</div>
+      <div class="row wrap">
+        <select id="log-recipe" style="flex:2;min-width:160px;">
+          <option value="">Choose a recipe…</option>
+        </select>
+        <input type="number" id="log-recipe-servings" placeholder="servings" style="flex:1;min-width:80px;" value="1" min="1" />
+        <button class="btn sm" id="log-from-recipe">Log it</button>
+      </div>` : ""}
       <hr />
       <div class="section-title" style="margin-top:0;">Or log manually</div>
       ${templates.length ? `<div class="row wrap" id="today-template-chips"></div>` : ""}
@@ -222,6 +234,38 @@ export async function render(container) {
     `;
 
     wireNaturalLanguageLog(wrap);
+
+    const logRecipeSelect = wrap.querySelector("#log-recipe");
+    if (logRecipeSelect) {
+      for (const r of allRecipes) {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = r.title;
+        logRecipeSelect.appendChild(opt);
+      }
+      wrap.querySelector("#log-from-recipe").addEventListener("click", async () => {
+        const recipeId = logRecipeSelect.value;
+        if (!recipeId) return;
+        const recipe = allRecipes.find((r) => r.id === recipeId);
+        if (!recipe) return;
+        const servings = Number(wrap.querySelector("#log-recipe-servings").value) || recipe.baseServings || 1;
+        const n = recipe.nutritionPerServing || {};
+        mealLog.meals.push({
+          name: recipe.title,
+          recipeId: recipe.id,
+          servings,
+          macros: {
+            kcal: Math.round((n.kcal || 0) * servings),
+            protein: Math.round((n.protein || 0) * servings),
+            carbs: Math.round((n.carbs || 0) * servings),
+            fat: Math.round((n.fat || 0) * servings),
+          },
+          source: "recipe",
+        });
+        mealLog = await saveMealLog(mealLog);
+        render(container);
+      });
+    }
 
     const templateChipsWrap = wrap.querySelector("#today-template-chips");
     if (templateChipsWrap) {
@@ -249,7 +293,7 @@ export async function render(container) {
       row.className = "stack";
       row.innerHTML = `
         <div class="row between">
-          <span>${m.name} <span class="hint">${m.macros.kcal} kcal</span></span>
+          <span>${escapeHtml(m.name)} <span class="hint">${m.macros.kcal} kcal</span></span>
           <div class="row">
             <button class="btn sm ghost save-tpl">Save as template</button>
             <button class="btn sm ghost remove-meal">Remove</button>

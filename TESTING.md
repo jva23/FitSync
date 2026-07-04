@@ -577,3 +577,129 @@ recipe page (see deviations below).
   `callClaudeForJSON`) is the only retry; model-tier fallback wasn't in
   scope and would mask genuine extraction failures behind a slower,
   different-quality response.
+
+## Phase 6c specific checks (Recipe library — integration)
+
+Verified live in the preview browser this session (direct `db.js`/module
+calls plus real UI interaction — no AI calls needed for this phase, so no
+`fetch` mocking was required):
+
+- [x] **Auto-macros, Meals tab**: added a recipe via the new "From your
+      recipes" section in the per-day add-meal form (2 servings of a
+      380-kcal/serving recipe) — macros filled in as 760 kcal / 28g protein
+      with zero manual entry; `recipeId`/`servings` stored on the meal
+      entry; the day card shows "From recipe: `<title>` · N servings" with
+      an "Open recipe" link back to the detail view.
+- [x] **Auto-macros, Today's quick-log**: same computation via the new "Or
+      log from a recipe" section — logged 2 servings of a 550-kcal recipe,
+      confirmed 1100 kcal / 100g protein in the day's totals.
+- [x] **"Add to plan" from the recipe detail view**: picked a date in a
+      *different* week than the one currently open in the Meals tab (so
+      `loadOrCreateMealPlan` had to create that week's plan doc from
+      scratch, not just append to an already-loaded one) plus a servings
+      count — the new week's plan was created correctly with the right
+      per-serving-scaled macros.
+- [x] **Grocery generation — batch-tag dedup**: planned the same recipe
+      (with the same batch tag) on two different days, each showing
+      "2 servings" and full per-day macros for both days independently —
+      but "Generate from recipes" contributed that recipe's ingredients
+      (e.g. "1 whole pork shoulder") only **once**, not twice, confirming
+      a batch cook is shopped for once regardless of how many days it's
+      portioned across.
+- [x] **Grocery generation — normal (non-batch) scaling**: a second recipe
+      planned without a batch tag at 2 of its 4 base servings had its
+      ingredients scaled to half (e.g. "2 cup rice" → "1 cup rice") and
+      contributed every time it's planned (as expected — a non-batch dish
+      eaten twice genuinely needs the ingredients twice).
+- [x] **Cross-recipe consolidation**: both test recipes used "chili
+      powder" — the batch recipe's un-scaled 2 tbsp plus the second
+      recipe's scaled 0.5 tbsp combined into a single "2.5 tbsp chili
+      powder" line, confirming same-name-same-unit merging across
+      different recipes.
+- [x] **Unit-mismatch stays separate**: directly exercised
+      `consolidateIngredients` with `1 cup flour` + `2 tbsp flour` —
+      produced two separate lines ("1 cup flour", "2 tbsp flour") rather
+      than an incorrect merge, matching RECIPES_MODULE_PLAN §7's explicit
+      test case.
+- [x] **Aisle grouping + learned overrides**: generated items grouped
+      correctly under seeded categories (pork shoulder → Meat, eggs →
+      Dairy, tortillas → Bakery, rice → Pantry, chili powder → Spices).
+      Recategorized "pork shoulder" to Frozen via its dropdown — persisted
+      to the new `aisle_overrides` store, and a subsequent "Generate from
+      recipes" click correctly kept it filed under Frozen instead of
+      reverting to the seed guess.
+- [x] **Check-off**: tapping a grocery item toggles `checked` and applies
+      `text-decoration: line-through` (confirmed via computed style, not
+      just visually).
+- [x] **Manual items coexist with recipe items and survive
+      regeneration**: added a manual "Paper towels" item, then clicked
+      "Generate from recipes" twice — the manual item was still present
+      both times, while the recipe-derived items were recomputed fresh
+      each time (as designed — regeneration only replaces the
+      `source: "recipe"` portion of the list).
+- [x] **Legacy string-array `groceryList` migration**: called
+      `normalizeGroceryList(["Old plain string item", ...])` directly —
+      upgraded to the new structured shape (`{id, text, name, aisle:
+      "other", checked: false, source: "manual"}`) without losing any
+      items, so a Phase 2 plan opened after this upgrade keeps its grocery
+      list instead of it going blank.
+- [x] No console errors across Meals, Today, or Recipe detail during any
+      of the above, including a full clean reload afterward.
+
+Not yet exercised: the AI weekly-generation/replan snapshot (`ai-snapshot.js`)
+doesn't yet include the `recipeIndex` described in RECIPES_MODULE_PLAN §4 —
+that's explicitly Phase 6d scope ("weekly generation preferring owned
+recipes"), so AI-generated plans still can't reference the recipe library
+yet; only manual planning (Meals tab, Today, recipe detail) does as of 6c.
+
+## Known deviations from BUILD_GUIDE / RECIPES_MODULE_PLAN (Phase 6c)
+
+- **`db.js` is now well past the ~400-line guideline (approaching 600).**
+  BUILD_GUIDE has two rules in tension here: "no file over ~400 lines" and
+  "All IndexedDB access goes through db.js... Views never import idb
+  directly." Splitting db.js across multiple files (as `ai.js` was split
+  in Phase 4) would fragment the single storage-access surface the second
+  rule exists to protect, for a store of small, mostly-independent CRUD
+  functions rather than one genuinely oversized subsystem. Kept as one
+  file and flagging the tradeoff explicitly rather than making the split
+  silently.
+- **Grocery consolidation never attempts cross-unit-family conversion**
+  (e.g. treating "1 cup" and "16 tbsp" as equivalent). RECIPES_MODULE_PLAN
+  §2 says to "normalize units where safe" and §7's own test explicitly
+  wants `1 cup` + `2 tbsp` to stay separate rather than risk a wrong
+  merge — so "safe" was read narrowly as exact-match-after-aliasing
+  (`tbsps`/`tablespoons` → `tbsp`, etc.), never arithmetic conversion
+  between unit families. The failure mode is two separate grocery lines
+  instead of one combined line, which is the safer direction per that
+  same test case.
+- **Ingredient-name singularization is a small alias/suffix heuristic, not
+  a real stemmer.** Common recipe plurals (eggs, tomatoes, potatoes,
+  cloves, and regular `-s`/`-ies`/`-oes` endings) consolidate correctly; a
+  short protected-word list (hummus, asparagus, molasses, couscous, grits)
+  guards the obvious false positives. Any plural this doesn't recognize
+  just fails to consolidate (falls back to a separate line) rather than
+  mangling the word — the same "list separately rather than merge wrongly"
+  principle applied to names, not just units.
+- **Aisle overrides are keyed by ingredient/item name only, not
+  per-recipe.** If "chicken broth" should be Pantry in one context and
+  something else elsewhere, there's a single global correction. Given a
+  single owner's pantry doesn't actually vary by recipe, a per-recipe
+  override felt like unwarranted complexity.
+- **Batch-tag dedup is keyed on `(recipeId, batchTag)` together, not
+  `batchTag` alone.** Two different recipes that happen to share a batch
+  tag string contribute ingredients for both (correctly — they're two
+  separate batch cooks), while the same recipe repeated under the same tag
+  contributes once. This wasn't explicitly specified but follows directly
+  from what a batch tag is supposed to mean (one cook, one recipe).
+- **`meal_logs` entries logged "from a recipe" don't get a `batchTag`
+  field** (unlike `meal_plans` entries, which do via the Meals tab and the
+  recipe detail's "Add to plan"). Today's quick-log is about recording
+  what was actually eaten *today*, not scheduling a future batch cook, so
+  there's no day-spanning grouping concept for it to opt into.
+- **Recipe-linked meals don't lock their macro fields.** If the owner
+  later hand-edits a recipe-derived meal's macros directly (not built in
+  this phase — there's no such UI yet, since the Meals/Today rows don't
+  expose macro-editing for existing entries), nothing currently reconciles
+  that against the recipe or clears `recipeId`. Not a regression — the
+  same was already true of manually-entered meals — but worth noting if
+  inline macro editing is added later.

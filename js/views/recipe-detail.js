@@ -2,9 +2,10 @@
 // ingredients, tap-to-highlight steps. Wake-lock and running timers are
 // deferred to Phase 6e per RECIPES_MODULE_PLAN's own build order — this
 // phase only needs the recipe to be genuinely cookable from, not hands-free.
-import { getRecipe, saveRecipe, deleteRecipe, listRecipeImages, listRecipes } from "../db.js";
+import { getRecipe, saveRecipe, deleteRecipe, listRecipeImages, listRecipes, saveMealPlan } from "../db.js";
 import { buildRecipeForm } from "../recipe-form.js";
-import { formatAmount, scaleAmount, todayLocalDate, escapeHtml } from "../utils.js";
+import { formatAmount, scaleAmount, todayLocalDate, mondayOf, escapeHtml } from "../utils.js";
+import { loadOrCreateMealPlan } from "../meal-plan-helpers.js";
 import { showToast } from "../toast.js";
 
 function confidenceMark(c) {
@@ -28,6 +29,7 @@ export async function render(container, params) {
 
   let servings = recipe?.baseServings || 1;
   let editing = false;
+  let addingToPlan = false;
   const checkedIngredients = new Set();
   let activeStepId = null;
   let photoObjectUrls = [];
@@ -47,6 +49,7 @@ export async function render(container, params) {
     }
     container.appendChild(backLink());
     container.appendChild(headerCard());
+    if (addingToPlan) container.appendChild(addToPlanCard());
     container.appendChild(servingsCard());
     container.appendChild(stepsCard());
     container.appendChild(nutritionCard());
@@ -100,11 +103,16 @@ export async function render(container, params) {
       </div>
       ${recipe.batchYield ? `<p class="hint">${escapeHtml(recipe.batchYield)}</p>` : ""}
       <div class="row wrap">
+        <button class="btn sm primary" id="add-to-plan">Add to plan</button>
         <button class="btn sm" id="mark-cooked">Mark as cooked</button>
         <button class="btn sm ghost" id="edit-recipe">Edit</button>
         <button class="btn sm danger" id="delete-recipe">Delete</button>
       </div>
     `;
+    wrap.querySelector("#add-to-plan").addEventListener("click", () => {
+      addingToPlan = !addingToPlan;
+      paint();
+    });
     wrap.querySelector("#mark-cooked").addEventListener("click", async () => {
       recipe = await saveRecipe({
         ...recipe,
@@ -123,6 +131,62 @@ export async function render(container, params) {
       showToast("Recipe deleted");
       location.hash = "#/recipes";
     });
+    return wrap;
+  }
+
+  function addToPlanCard() {
+    const wrap = document.createElement("div");
+    wrap.className = "card stack";
+    wrap.innerHTML = `
+      <div class="section-title" style="margin:0;">Add to plan</div>
+      <div class="row wrap">
+        <div class="field" style="flex:1;min-width:140px;"><label>Day</label><input type="date" id="plan-date" /></div>
+        <div class="field" style="flex:1;min-width:100px;"><label>Servings</label><input type="number" id="plan-servings" min="1" /></div>
+      </div>
+      <div class="field"><label>Batch tag (optional)</label><input type="text" id="plan-batch" placeholder="e.g. smoked-pork-0706" /></div>
+      <div class="row">
+        <button class="btn ghost" id="plan-cancel">Cancel</button>
+        <button class="btn primary" id="plan-add" style="flex:1;">Add to day</button>
+      </div>
+    `;
+    wrap.querySelector("#plan-date").value = todayLocalDate();
+    wrap.querySelector("#plan-servings").value = recipe.baseServings || 1;
+
+    wrap.querySelector("#plan-cancel").addEventListener("click", () => {
+      addingToPlan = false;
+      paint();
+    });
+
+    wrap.querySelector("#plan-add").addEventListener("click", async () => {
+      const date = wrap.querySelector("#plan-date").value;
+      if (!date) return;
+      const planServings = Number(wrap.querySelector("#plan-servings").value) || recipe.baseServings || 1;
+      const batchTag = wrap.querySelector("#plan-batch").value.trim();
+
+      const plan = await loadOrCreateMealPlan(mondayOf(date));
+      const day = plan.days.find((d) => d.date === date);
+      if (!day) return;
+      const n = recipe.nutritionPerServing || {};
+      day.meals.push({
+        name: recipe.title,
+        description: recipe.description || "",
+        recipeId: recipe.id,
+        servings: planServings,
+        macros: {
+          kcal: Math.round((n.kcal || 0) * planServings),
+          protein: Math.round((n.protein || 0) * planServings),
+          carbs: Math.round((n.carbs || 0) * planServings),
+          fat: Math.round((n.fat || 0) * planServings),
+        },
+        prepMethod: recipe.prepMethod || "none",
+        batchTag,
+      });
+      await saveMealPlan(plan);
+      addingToPlan = false;
+      showToast(`Added to ${date}`, { type: "success" });
+      paint();
+    });
+
     return wrap;
   }
 
