@@ -110,6 +110,41 @@ export function scaleAmount(amount, baseServings, targetServings) {
   return (amount * targetServings) / baseServings;
 }
 
+// Downscales a photo client-side before it ever touches IndexedDB or an AI
+// vision call, so attaching a few phone photos doesn't blow through storage
+// quota or the API's per-image size limits.
+export function downscaleImage(file, maxDim = 1600) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => {
+          URL.revokeObjectURL(url);
+          resolve(blob);
+        },
+        "image/jpeg",
+        0.85
+      );
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
+  });
+}
+
 // Suggests a barbell plate-loading breakdown per side. A helper, not an
 // enforcement — the lifter can always load whatever they actually have.
 export function plateMath(targetWeight, barWeight = 45, availablePlates = [45, 35, 25, 10, 5, 2.5]) {

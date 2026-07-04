@@ -4,7 +4,7 @@
 // phase only needs the recipe to be genuinely cookable from, not hands-free.
 import { getRecipe, saveRecipe, deleteRecipe, listRecipeImages, listRecipes } from "../db.js";
 import { buildRecipeForm } from "../recipe-form.js";
-import { formatAmount, scaleAmount, todayLocalDate } from "../utils.js";
+import { formatAmount, scaleAmount, todayLocalDate, escapeHtml } from "../utils.js";
 import { showToast } from "../toast.js";
 
 function confidenceMark(c) {
@@ -89,16 +89,16 @@ export async function render(container, params) {
     wrap.className = "card stack";
     const t = recipe.times || {};
     wrap.innerHTML = `
-      <h2>${recipe.title}</h2>
-      ${recipe.description ? `<p>${recipe.description}</p>` : ""}
+      <h2>${escapeHtml(recipe.title)}</h2>
+      ${recipe.description ? `<p>${escapeHtml(recipe.description)}</p>` : ""}
       <div class="row wrap">
-        ${(recipe.categories || []).map((c) => `<span class="badge">${c}</span>`).join("")}
-        ${recipe.prepMethod && recipe.prepMethod !== "none" ? `<span class="badge">${recipe.prepMethod}</span>` : ""}
+        ${(recipe.categories || []).map((c) => `<span class="badge">${escapeHtml(c)}</span>`).join("")}
+        ${recipe.prepMethod && recipe.prepMethod !== "none" ? `<span class="badge">${escapeHtml(recipe.prepMethod)}</span>` : ""}
         ${t.totalMin ? `<span class="badge">${t.totalMin} min total</span>` : ""}
         ${recipe.rating ? `<span class="badge">${"★".repeat(recipe.rating)}</span>` : ""}
         ${recipe.timesCooked ? `<span class="badge success">cooked ${recipe.timesCooked}×</span>` : ""}
       </div>
-      ${recipe.batchYield ? `<p class="hint">${recipe.batchYield}</p>` : ""}
+      ${recipe.batchYield ? `<p class="hint">${escapeHtml(recipe.batchYield)}</p>` : ""}
       <div class="row wrap">
         <button class="btn sm" id="mark-cooked">Mark as cooked</button>
         <button class="btn sm ghost" id="edit-recipe">Edit</button>
@@ -159,7 +159,7 @@ export async function render(container, params) {
       const amount = ing.amount ? formatAmount(scaleAmount(ing.amount, recipe.baseServings || 1, servings)) : "";
       const checked = checkedIngredients.has(ing.id);
       const label = [amount, ing.unit, ing.name].filter(Boolean).join(" ") + (ing.prepNote ? `, ${ing.prepNote}` : "");
-      row.innerHTML = `<span style="${checked ? "text-decoration:line-through;color:var(--text-faint);" : ""}">${label}</span>`;
+      row.innerHTML = `<span style="${checked ? "text-decoration:line-through;color:var(--text-faint);" : ""}">${escapeHtml(label)}</span>`;
       row.addEventListener("click", () => {
         if (checked) checkedIngredients.delete(ing.id);
         else checkedIngredients.add(ing.id);
@@ -186,10 +186,10 @@ export async function render(container, params) {
       row.style.cursor = "pointer";
       row.innerHTML = `
         <div class="row between">
-          <strong>${i + 1}. ${step.title || ""}</strong>
+          <strong>${i + 1}. ${escapeHtml(step.title || "")}</strong>
           ${step.timerSeconds ? `<span class="badge">${formatTimer(step.timerSeconds)}</span>` : ""}
         </div>
-        <p>${step.text}</p>
+        <p>${escapeHtml(step.text)}</p>
       `;
       row.addEventListener("click", () => {
         activeStepId = active ? null : step.id;
@@ -219,7 +219,7 @@ export async function render(container, params) {
   function notesCard() {
     const wrap = document.createElement("div");
     wrap.className = "card";
-    wrap.innerHTML = `<div class="section-title" style="margin:0;">Notes</div><p>${recipe.notes}</p>`;
+    wrap.innerHTML = `<div class="section-title" style="margin:0;">Notes</div><p>${escapeHtml(recipe.notes)}</p>`;
     return wrap;
   }
 

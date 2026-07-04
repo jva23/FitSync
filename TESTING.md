@@ -446,3 +446,134 @@ owner's first real use.
   sessions: after editing any file already cached by a running SW,
   unregister the SW and clear caches (or bump `CACHE_VERSION`, done here to
   `v6`) before trusting a reload to reflect new source.
+
+## Phase 6b specific checks (Recipe library — intake paths)
+
+Verified live in the preview browser this session, with `window.fetch`
+intercepted to return canned Anthropic-shaped responses (no real API key was
+available — same caveat as Phase 4: this validates the entire client-side
+pipeline — prompt building, request shape, JSON parsing, the review screen,
+save/photo-attach — but not real model output quality or latency).
+
+- [x] **Paste/Import — direct canonical JSON**: pasted a full canonical
+      recipe JSON (no AI call) — recognized automatically, opened the
+      review form pre-filled with every field, saved and displayed
+      correctly. Also doubles as the "re-import an export" and "paste a
+      Claude-formatted recipe from another chat" paths since they're the
+      same shape.
+- [x] **Paste/Import — arbitrary text (Haiku)**: pasted plain prose
+      ("Chili: 2 lb ground beef, simmer 30 minutes...") — routed through
+      `extractRecipeFromText`; confirmed via the intercepted request that
+      it used `claude-haiku-4-5-20251001` with plain string content (no
+      `tools`), and the review form came back correctly populated.
+- [x] **From Photo (Sonnet vision)**: injected a synthetic image file into
+      the file input via `DataTransfer` (no real camera available),
+      confirmed the photo was downscaled to JPEG before the call, the
+      request used `claude-sonnet-4-6` with an `image` content block
+      (base64, `media_type: "image/jpeg"`) alongside the text instruction,
+      and the warnings box rendered at the top of the review form from the
+      mocked response's `warnings` array.
+- [x] **From URL (Sonnet + web_fetch tool)**: confirmed the request
+      included `tools: [{ type: "web_fetch_20250910", name: "web_fetch",
+      max_uses: 1, max_content_tokens: 50000 }]` and that the URL appeared
+      literally in the message text (required — the tool can only fetch
+      URLs already present in the conversation). Also specifically
+      exercised the **last-text-block bug fix**: the mocked response
+      included a preliminary text block ("I'll fetch that page now."),
+      then `server_tool_use`/`web_fetch_tool_result` blocks, then the real
+      JSON answer as a *later* text block — the response parsed correctly
+      instead of choking on the preliminary text, confirming `callClaude`
+      now reads the last text block rather than `content[0]`.
+- [x] **Estimate nutrition (AI) button, manual entry**: with one ingredient
+      entered, clicked the button — filled kcal/protein/carbs/fat from the
+      mocked Haiku response, showed the assumptions line, and updated the
+      hint to "(currently ai_estimate...)".
+- [x] **Confidence-tracking fix**: saved an AI-extracted/estimated recipe
+      *without* touching the nutrition fields — confidence correctly
+      stayed `ai_estimate` (assumptions preserved) instead of the old 6a
+      behavior of stamping `verified` on any non-zero save. Then edited one
+      macro value by hand and saved again — confidence correctly flipped to
+      `verified` and the stale assumptions text was cleared.
+- [x] **XSS fix verification**: pasted a canonical JSON recipe with
+      deliberately hostile strings in every text field (`<img
+      src=x onerror=alert(1)>` in the title, `<script>bad</script>` as a
+      category, an attribute-breakout string — `flour" onmouseover="alert(2)`
+      — as an ingredient name, HTML tags in the description/notes). Every
+      field rendered as inert literal text in the review form, the saved
+      recipe's library card, and the detail view — no script execution, no
+      layout breakage, no attribute breakout. Confirms the `recipe-form.js`
+      rewrite (DOM property assignment instead of `value="${...}"` string
+      interpolation) and the `escapeHtml()` additions in `recipes.js` /
+      `recipe-detail.js` actually close the gap.
+- [x] No console errors across any of the above, including the empty
+      "Recipe not found" state after deleting a recipe whose detail view
+      was still the active route.
+
+Not yet exercised: a real end-to-end call against the live Anthropic API
+(no key available in this environment — same caveat as every other AI
+phase), and a `pause_turn`/multi-fetch continuation for an unusually large
+recipe page (see deviations below).
+
+## Known deviations from BUILD_GUIDE / RECIPES_MODULE_PLAN (Phase 6b)
+
+- **A real stored-XSS gap in the Phase 6a form was found and fixed as part
+  of this phase, not left as pre-existing.** 6a's manual entry form only
+  had to trust the owner's own typing, so building `recipe-form.js`'s
+  inputs via `value="${recipe.title}"`-style template interpolation was
+  low-risk. Once recipe content can come from a scraped web page or photo
+  OCR (this phase), that same pattern becomes a real stored-XSS vector —
+  and separately, `value="..."` attribute interpolation was never safe
+  against a bare `"` character breaking out of the attribute, since
+  `escapeHtml()` (text-node-safe via `textContent`) doesn't escape quotes.
+  Fixed by setting all dynamic field values via DOM property assignment
+  (`.value =`) instead, which never parses the string as markup regardless
+  of its content, plus `escapeHtml()` on every recipe-derived string
+  rendered in `recipes.js`'s card list and `recipe-detail.js`'s read-only
+  view (both text-node contexts, where `escapeHtml()` is sufficient).
+- **`callClaude`/`callClaudeForJSON` signature changed** from a positional
+  `maxTokens` argument to an options object (`{ maxTokens, tools }`), and
+  both are now exported from `ai.js` (previously module-private) so
+  `ai-recipes.js` can reuse the same request/retry/error-handling logic
+  rather than duplicating it. The one existing call site
+  (`estimateMealMacros`) was updated; behavior for every other existing
+  call is unchanged since `maxTokens` still defaults to 4000.
+- **`callClaude` now reads the *last* text content block instead of
+  `content[0]`.** This was a latent bug that only matters once a `tools`
+  array can be present: a `web_fetch`/`web_search` turn can return a
+  preliminary text block ("I'll fetch that now") before the tool call,
+  followed by the real answer in a later text block after the tool result.
+  Reading `content[0]` would have silently fed Claude's preliminary text
+  into the JSON parser instead of the real answer. Every existing
+  tool-free call path (planning, chat, meal estimates) still has exactly
+  one text block, so this is a strict fix with no behavior change for
+  them.
+- **No `pause_turn` continuation loop for `extractRecipeFromUrl`.** Per
+  Anthropic's docs, an unusually large or slow page fetch can return
+  `stop_reason: "pause_turn"`, requiring the paused message to be resent
+  to continue. Building that continuation loop for what should be a rare
+  case (recipe pages are typically small) wasn't worth the added
+  complexity; a page that triggers this will surface as "AI response
+  wasn't understood" via the existing corrective-retry path instead of
+  silently hanging. `max_uses: 1` and `max_content_tokens: 50000` are set
+  on the `web_fetch` tool to keep both cost and the chance of hitting this
+  bounded.
+- **Paste/Import routes both "arbitrary pasted text" and "canonical JSON
+  without its own `source`" through `source.type: "claude_import"`.**
+  RECIPES_MODULE_PLAN's intake path #4 ("Import Claude-created recipes")
+  and the "arbitrary pasted recipe text/markdown" sub-case in the same
+  section share one chooser button and one panel in this implementation,
+  so they share one source type rather than inventing a distinct
+  `source.type` for plain-text paste that the schema (§2) doesn't define.
+- **The "From Photo" and "Paste/Import" panels don't auto-fallback into
+  each other on failure.** RECIPES_MODULE_PLAN §3.2 describes a fallback
+  from a failed URL fetch to "paste the recipe text" — implemented as a
+  hint line pointing the owner at the other chooser button rather than an
+  automatic panel switch, since silently discarding what they'd already
+  entered (a URL, or photos) to swap UI out from under them seemed more
+  surprising than a one-tap manual switch.
+- **`extractRecipeFromImages` and `extractRecipeFromText` don't retry with
+  a different model tier on failure** (e.g. falling back Sonnet → Haiku or
+  vice versa). A single corrective JSON-retry (already built into
+  `callClaudeForJSON`) is the only retry; model-tier fallback wasn't in
+  scope and would mask genuine extraction failures behind a slower,
+  different-quality response.

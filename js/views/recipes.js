@@ -1,8 +1,10 @@
-// Recipe library: search/filter/sort, and the "+ Add Recipe" chooser. Only
-// the Manual path is wired up in Phase 6a — From URL / From Photo /
-// Paste-Import are Phase 6b (they need the AI extraction pipeline).
-import { listRecipes, saveRecipe, listRecipeImages, saveRecipeImage } from "../db.js";
+// Recipe library: search/filter/sort, and the "+ Add Recipe" chooser with
+// all four intake paths (Manual, Paste/Import, From Photo, From URL) wired
+// up as of Phase 6b.
+import { listRecipes, saveRecipe, saveRecipeImage } from "../db.js";
 import { buildRecipeForm } from "../recipe-form.js";
+import { buildPastePanel, buildPhotoPanel, buildUrlPanel } from "../recipe-intake.js";
+import { downscaleImage, escapeHtml } from "../utils.js";
 import { showToast } from "../toast.js";
 
 const PREP_FILTERS = ["all", "grill", "smoker", "stove", "oven", "none", "mixed"];
@@ -12,40 +14,6 @@ const SORTS = [
   { value: "rating", label: "Highest rated" },
   { value: "title", label: "Title A-Z" },
 ];
-
-// Downscales a photo client-side before it ever touches IndexedDB, so
-// attaching a few phone photos doesn't blow through storage quota.
-function downscaleImage(file, maxDim = 1600) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      let { width, height } = img;
-      if (width > maxDim || height > maxDim) {
-        const scale = maxDim / Math.max(width, height);
-        width = Math.round(width * scale);
-        height = Math.round(height * scale);
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-      canvas.toBlob(
-        (blob) => {
-          URL.revokeObjectURL(url);
-          resolve(blob);
-        },
-        "image/jpeg",
-        0.85
-      );
-    };
-    img.onerror = (e) => {
-      URL.revokeObjectURL(url);
-      reject(e);
-    };
-    img.src = url;
-  });
-}
 
 function confidenceMark(c) {
   if (c === "verified") return "✓";
@@ -59,14 +27,20 @@ export async function render(container) {
   let categoryFilter = "all";
   let prepFilter = "all";
   let sortBy = "recent";
-  let showForm = false;
+
+  // mode: null (browsing) | "manual" | "paste" | "photo" | "url" (intake
+  // panel showing) | "review" (extraction done, showing the editable form).
+  let mode = null;
+  let reviewDraft = null;
+  let reviewWarnings = [];
+  let reviewSourcePhotos = [];
 
   paint();
 
   function paint() {
     container.innerHTML = "";
     container.appendChild(toolbar());
-    if (showForm) container.appendChild(formSlot());
+    if (mode) container.appendChild(modeSlot());
     container.appendChild(list());
   }
 
@@ -78,12 +52,13 @@ export async function render(container) {
     const wrap = document.createElement("div");
     wrap.className = "stack";
     wrap.innerHTML = `
-      <input type="text" id="r-search" placeholder="Search title, ingredient, category..." value="${search}" />
+      <input type="text" id="r-search" placeholder="Search title, ingredient, category..." />
       <div class="row wrap" id="cat-chips"></div>
       <div class="row wrap" id="prep-chips"></div>
       <select id="sort-select"></select>
       <div class="row wrap" id="add-chooser"></div>
     `;
+    wrap.querySelector("#r-search").value = search;
     wrap.querySelector("#r-search").addEventListener("input", (e) => {
       search = e.target.value.toLowerCase();
       renderList();
@@ -134,21 +109,17 @@ export async function render(container) {
 
     const chooser = wrap.querySelector("#add-chooser");
     const options = [
-      { label: "Manual", enabled: true },
-      { label: "From URL", enabled: false },
-      { label: "From Photo", enabled: false },
-      { label: "Paste/Import", enabled: false },
+      { label: "Manual", mode: "manual" },
+      { label: "From URL", mode: "url" },
+      { label: "From Photo", mode: "photo" },
+      { label: "Paste/Import", mode: "paste" },
     ];
     for (const opt of options) {
       const btn = document.createElement("button");
-      btn.className = opt.enabled ? "btn primary" : "btn ghost";
+      btn.className = "btn primary";
       btn.textContent = `+ ${opt.label}`;
       btn.addEventListener("click", () => {
-        if (!opt.enabled) {
-          showToast(`${opt.label} import is coming in a later phase — use Manual for now.`);
-          return;
-        }
-        showForm = true;
+        mode = opt.mode;
         paint();
       });
       chooser.appendChild(btn);
@@ -157,29 +128,69 @@ export async function render(container) {
     return wrap;
   }
 
-  function formSlot() {
+  function resetIntake() {
+    mode = null;
+    reviewDraft = null;
+    reviewWarnings = [];
+    reviewSourcePhotos = [];
+  }
+
+  function modeSlot() {
     const slot = document.createElement("div");
-    slot.appendChild(
-      buildRecipeForm({
-        recipe: null,
-        allCategories: allCategories(),
-        onCancel: () => {
-          showForm = false;
-          paint();
-        },
-        onSave: async (draft, pendingPhotos) => {
-          const saved = await saveRecipe(draft);
-          for (const file of pendingPhotos) {
-            const blob = await downscaleImage(file);
-            const existing = await listRecipeImages(saved.id);
-            await saveRecipeImage({ recipeId: saved.id, blob, isPrimary: existing.length === 0 });
-          }
-          showToast("Recipe saved", { type: "success" });
-          location.hash = `#/recipe/${saved.id}`;
-        },
-      })
-    );
+
+    if (mode === "manual") {
+      slot.appendChild(reviewForm(null, []));
+      return slot;
+    }
+    if (mode === "review") {
+      slot.appendChild(reviewForm(reviewDraft, reviewWarnings));
+      return slot;
+    }
+
+    const onExtracted = (recipe, warnings, sourcePhotos) => {
+      reviewDraft = recipe;
+      reviewWarnings = warnings;
+      reviewSourcePhotos = sourcePhotos;
+      mode = "review";
+      paint();
+    };
+    const onCancel = () => {
+      resetIntake();
+      paint();
+    };
+
+    if (mode === "paste") slot.appendChild(buildPastePanel({ onExtracted, onCancel }));
+    else if (mode === "photo") slot.appendChild(buildPhotoPanel({ onExtracted, onCancel }));
+    else if (mode === "url") slot.appendChild(buildUrlPanel({ onExtracted, onCancel }));
+
     return slot;
+  }
+
+  function reviewForm(recipe, warnings) {
+    return buildRecipeForm({
+      recipe,
+      allCategories: allCategories(),
+      warnings,
+      onCancel: () => {
+        resetIntake();
+        paint();
+      },
+      onSave: async (draft, pendingPhotos) => {
+        const saved = await saveRecipe(draft);
+        let primarySet = false;
+        for (const blob of reviewSourcePhotos) {
+          await saveRecipeImage({ recipeId: saved.id, blob, isPrimary: !primarySet });
+          primarySet = true;
+        }
+        for (const file of pendingPhotos) {
+          const blob = await downscaleImage(file);
+          await saveRecipeImage({ recipeId: saved.id, blob, isPrimary: !primarySet });
+          primarySet = true;
+        }
+        showToast("Recipe saved", { type: "success" });
+        location.hash = `#/recipe/${saved.id}`;
+      },
+    });
   }
 
   function filtered() {
@@ -222,7 +233,7 @@ export async function render(container) {
       const emptyAdd = listEl.querySelector("#empty-add");
       if (emptyAdd) {
         emptyAdd.addEventListener("click", () => {
-          showForm = true;
+          mode = "manual";
           paint();
         });
       }
@@ -235,13 +246,13 @@ export async function render(container) {
       const n = r.nutritionPerServing || {};
       card.innerHTML = `
         <div class="row between">
-          <strong>${r.title}</strong>
+          <strong>${escapeHtml(r.title)}</strong>
           ${r.rating ? `<span class="hint">${"★".repeat(r.rating)}</span>` : ""}
         </div>
-        ${r.description ? `<p>${r.description}</p>` : ""}
+        ${r.description ? `<p>${escapeHtml(r.description)}</p>` : ""}
         <div class="row wrap">
-          ${(r.categories || []).map((c) => `<span class="badge">${c}</span>`).join("")}
-          ${r.prepMethod && r.prepMethod !== "none" ? `<span class="badge">${r.prepMethod}</span>` : ""}
+          ${(r.categories || []).map((c) => `<span class="badge">${escapeHtml(c)}</span>`).join("")}
+          ${r.prepMethod && r.prepMethod !== "none" ? `<span class="badge">${escapeHtml(r.prepMethod)}</span>` : ""}
           <span class="badge">${confidenceMark(n.confidence)} ${n.kcal || 0} kcal</span>
           ${r.timesCooked ? `<span class="badge success">cooked ${r.timesCooked}×</span>` : ""}
         </div>

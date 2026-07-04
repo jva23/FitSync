@@ -40,7 +40,12 @@ function stripFences(text) {
   return text.replace(/```json|```/g, "").trim();
 }
 
-async function callClaude(model, systemPrompt, messages, maxTokens = 4000) {
+// `tools` (optional) is passed straight through to the API for server tools
+// like web_fetch. Those flows can interleave the tool call between text
+// blocks (a preliminary "I'll fetch that" followed by the real answer after
+// the fetch completes), so the *last* text block is Claude's actual answer —
+// not content[0], which would grab the preliminary text instead.
+export async function callClaude(model, systemPrompt, messages, { maxTokens = 4000, tools } = {}) {
   const settings = await getSettings();
   if (!settings.apiKey) {
     throw new AiError("Add an API key in Settings to use AI features.");
@@ -58,7 +63,13 @@ async function callClaude(model, systemPrompt, messages, maxTokens = 4000) {
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true",
       },
-      body: JSON.stringify({ model, max_tokens: maxTokens, system: systemPrompt, messages }),
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages,
+        ...(tools ? { tools } : {}),
+      }),
       signal: controller.signal,
     });
   } catch (err) {
@@ -74,11 +85,12 @@ async function callClaude(model, systemPrompt, messages, maxTokens = 4000) {
   }
 
   const data = await res.json();
-  return data.content?.[0]?.text || "";
+  const textBlocks = (data.content || []).filter((b) => b.type === "text");
+  return textBlocks.length ? textBlocks[textBlocks.length - 1].text : "";
 }
 
-async function callClaudeForJSON(model, systemPrompt, messages, maxTokens = 4000) {
-  let text = await callClaude(model, systemPrompt, messages, maxTokens);
+export async function callClaudeForJSON(model, systemPrompt, messages, options = {}) {
+  let text = await callClaude(model, systemPrompt, messages, options);
   try {
     return JSON.parse(stripFences(text));
   } catch {
@@ -90,7 +102,7 @@ async function callClaudeForJSON(model, systemPrompt, messages, maxTokens = 4000
         content: "That wasn't valid JSON. Respond with ONLY the JSON object described in the system prompt — no prose, no markdown fences.",
       },
     ];
-    text = await callClaude(model, systemPrompt, retryMessages, maxTokens);
+    text = await callClaude(model, systemPrompt, retryMessages, options);
     try {
       return JSON.parse(stripFences(text));
     } catch {
@@ -159,6 +171,6 @@ export async function estimateMealMacros(text) {
   const today = todayLocalDate();
   const prompt = `Food description: "${text}"\nDate: ${today}\n${targetLine}\nEstimate macros for this as a log_meal_estimate action.`;
   const messages = [{ role: "user", content: prompt }];
-  const parsed = await callClaudeForJSON(HAIKU_MODEL, MEAL_ESTIMATE_SYSTEM_PROMPT, messages, 1024);
+  const parsed = await callClaudeForJSON(HAIKU_MODEL, MEAL_ESTIMATE_SYSTEM_PROMPT, messages, { maxTokens: 1024 });
   return normalizeResult(parsed);
 }
