@@ -8,7 +8,7 @@ import { mondayOf, weekISOFromMonday, todayLocalDate, addDaysStr } from "./utils
 
 const EXPORT_REMINDER_DAYS = 7;
 
-async function notify(title, body, tag) {
+export async function notify(title, body, tag) {
   if (!("serviceWorker" in navigator) || Notification.permission !== "granted") return;
   try {
     const reg = await navigator.serviceWorker.ready;

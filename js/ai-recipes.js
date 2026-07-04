@@ -3,6 +3,7 @@
 // — a different envelope from ai.js's {rationale, actions} contract, since
 // extraction produces a recipe draft for review, not a plan mutation.
 import { callClaudeForJSON, SONNET_MODEL, HAIKU_MODEL } from "./ai.js";
+import { blobToDataURL, uid } from "./utils.js";
 
 const PREP_METHODS = ["grill", "smoker", "stove", "oven", "none", "mixed"];
 
@@ -35,9 +36,17 @@ const NUTRITION_ESTIMATE_SYSTEM_PROMPT = `You estimate per-serving nutrition for
 
 export function normalizeRecipeDraft(raw, sourceOverride) {
   const r = raw || {};
+  // Every ingredient/step needs a stable, unique id — the ingredient
+  // checklist and step timers in recipe-detail.js key their state off it,
+  // and a recipe created via the coach's save_recipe action (or a direct
+  // canonical-JSON paste) never passes through recipe-form.js's own id
+  // assignment, so this is the one place that's guaranteed to run first.
+  // Preserve an id already present (e.g. re-importing an export) rather
+  // than reassigning a fresh one.
   const ingredients = Array.isArray(r.ingredients)
     ? r.ingredients
         .map((i) => ({
+          id: typeof i?.id === "string" && i.id ? i.id : uid(),
           amount: Number(i?.amount) || 0,
           unit: typeof i?.unit === "string" ? i.unit : "",
           name: typeof i?.name === "string" ? i.name.trim() : "",
@@ -48,6 +57,7 @@ export function normalizeRecipeDraft(raw, sourceOverride) {
   const steps = Array.isArray(r.steps)
     ? r.steps
         .map((s) => ({
+          id: typeof s?.id === "string" && s.id ? s.id : uid(),
           title: typeof s?.title === "string" ? s.title : "",
           text: typeof s?.text === "string" ? s.text.trim() : "",
           timerSeconds: Number(s?.timerSeconds) || undefined,
@@ -93,13 +103,9 @@ function normalizeResult(parsed, sourceOverride) {
   };
 }
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1]);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
+async function blobToBase64(blob) {
+  const dataUrl = await blobToDataURL(blob);
+  return dataUrl.split(",")[1];
 }
 
 // Cheap, frequent path: pasted recipe text/markdown -> canonical recipe.

@@ -3,6 +3,7 @@
 import { openDB } from "https://cdn.jsdelivr.net/npm/idb@8/+esm";
 import { emit, state } from "./state.js";
 import { EXERCISE_SEED } from "./seed/exercises.js";
+import { blobToDataURL } from "./utils.js";
 
 const DB_NAME = "fitsync";
 const DB_VERSION = 4;
@@ -500,15 +501,6 @@ export async function requestPersistentStorage() {
 // ---- Export / Import (the backup story) ----
 // recipe_images holds Blobs, which aren't JSON-serializable — round-trip
 // them through data: URLs on the way out and back on the way in.
-function blobToDataURL(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
-
 async function dataURLToBlob(dataURL) {
   const res = await fetch(dataURL);
   return res.blob();

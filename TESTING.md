@@ -785,3 +785,109 @@ only the client-side pipeline).
   recipe's id doesn't exist until after the batch applies — by design;
   see the 6d gate's own phrasing ("appears in library **and next week's
   plan**," not "this week's plan").
+
+## Phase 6e specific checks (Recipe library — polish)
+
+RECIPES_MODULE_PLAN §6e lists three items: cooking-mode wake-lock/timers,
+aisle learning, and Paprika HTML export. **Aisle learning was already fully
+built and verified in Phase 6c** (the `aisle_overrides` store plus the
+recategorize-and-remember UI in `grocery-ui.js`) — §2 of the module plan
+ties it directly to grocery-list generation, which is 6c's own deliverable,
+so there was no remaining work for it here. This phase covers the other two.
+
+Verified live in the preview browser this session:
+
+- [x] **Real countdown timers**: tapping a step's timer badge starts a
+      live per-second countdown (`⏱ 0:05` → ticking down), a second tap
+      pauses it, and reaching zero flips the badge to `✓ done` (success
+      style) and fires the completion path (toast + `navigator.vibrate` if
+      available + a best-effort system notification gated on both
+      `settings.notificationsEnabled` and `Notification.permission ===
+      "granted"`, mirroring `nudges.js`'s existing gate exactly).
+- [x] **A real, non-hypothetical bug caught by this feature**: a recipe
+      created via `db.saveRecipe()` directly (bypassing
+      `recipe-form.js`'s own id-assignment) had two steps both resolve to
+      the same `undefined` id — their timer badges collided on the same
+      DOM id (`#timer-undefined`) and showed identical, linked countdowns.
+      Traced this to a real gap: `ai-recipes.js`'s `normalizeRecipeDraft`
+      never assigned ids to ingredients/steps, and the Phase 6d
+      `save_recipe` coach action calls `saveRecipe()` on its output
+      directly — never routing through the form, which is the only place
+      that previously assigned ids. Any coach-generated recipe would have
+      hit this in production (colliding ingredient-checklist state too,
+      not just timers). Fixed by assigning stable ids in
+      `normalizeRecipeDraft` itself (preserving an existing id if the
+      source already had one, e.g. a re-imported export), so every
+      creation path guarantees unique ids independent of whether it passes
+      through the manual form. Reproduced the exact `save_recipe` code
+      path after the fix and confirmed both steps got distinct ids.
+- [x] **Two independent timers don't interfere**: started one step's
+      timer, confirmed the other stayed at its own untouched duration
+      throughout, and that tapping a timer badge does not also toggle the
+      step's highlight (`stopPropagation` on the badge's own click).
+- [x] **Timers survive unrelated repaints**: since this view fully rebuilds
+      its DOM on every state change, a naive implementation holding a
+      reference to the button at start time would go stale on the next
+      repaint. Confirmed the running countdown keeps updating correctly
+      because each tick re-queries the *current* live node by a stable id
+      through the outer `container` (which itself is never replaced) —
+      see `cook-timer.js`.
+- [x] **Wake lock**: `navigator.wakeLock.request("screen")` is attempted on
+      mount and released on unmount; confirmed the try/catch swallows a
+      failed acquisition with zero console errors (this sandboxed browser
+      environment doesn't grant real screen wake locks, so acquisition
+      itself couldn't be verified here — only that failure degrades
+      silently, which is the actual requirement: "degrade silently" per
+      BUILD_GUIDE/RECIPES_MODULE_PLAN). A `visibilitychange` listener
+      re-requests the lock after the tab is backgrounded and returns,
+      since browsers auto-release it on hide and don't reacquire on their
+      own.
+- [x] **Full-recipe Paprika export**: downloaded HTML for a recipe with a
+      photo, structured ingredients, timed steps, and total time —
+      confirmed real ingredient text ("2 cup rice, rinsed"), real step
+      text, proper `schema.org` `HowToStep` entries (not the old
+      "weren't tracked" placeholder), the embedded photo as a `data:`
+      image, and `totalTime` correctly formatted as ISO 8601 (`PT25M`).
+- [x] **Meals tab reuses the richer export for recipe-linked meals**: a
+      day's meal entry with a `recipeId` now downloads the full recipe
+      export (real ingredients/steps) instead of the old macros-only
+      placeholder version, which is still used as-is for meals that were
+      never linked to a recipe.
+- [x] No console errors across Recipes, Recipe detail, or Meals during any
+      of the above, including a full clean reload afterward.
+
+Not yet exercised: real wake-lock acquisition and a real system
+notification/vibration on an actual Android device — both are
+platform/hardware-dependent and unavailable in this sandboxed environment;
+only the code paths and graceful-degradation behavior were verified here.
+
+## Known deviations from BUILD_GUIDE / RECIPES_MODULE_PLAN (Phase 6e)
+
+- **A pre-existing FileReader-based `blobToDataURL` was duplicated three
+  times** (`db.js`, `ai-recipes.js`'s private `blobToBase64`, and now the
+  export feature needing a third copy) — consolidated into one shared
+  `blobToDataURL` in `utils.js` that all three import, rather than adding
+  yet another copy.
+- **Wake lock is acquired once for the whole view session (view/edit
+  toggling included), not re-acquired/released per edit-vs-view state.**
+  "Screen wake-lock while cooking mode is open" reads naturally as "while
+  this recipe's detail view is open" rather than needing to track a finer
+  cooking-vs-editing distinction — releasing it the moment the owner taps
+  Edit (then re-acquiring on Cancel) would add real complexity for a
+  behavior nobody would actually want (why would the screen dim mid-edit
+  of the same recipe you're cooking from?).
+- **Timer state resets if the owner navigates away and back mid-countdown.**
+  Timer state lives in a controller instance scoped to one view mount
+  (`createTimerController(container)`, created fresh in `render()`), and
+  the view's destroy function clears any running interval on unmount to
+  avoid a leaked timer silently ticking (and potentially firing a
+  notification) while the owner is looking at a different screen without
+  context. The tradeoff is that a timer doesn't persist across a
+  navigate-away-and-back; expecting the owner to stay on the recipe page
+  while a step timer runs is a reasonable v1 scope.
+- **Timer completion notifications reuse the exact same gate as
+  `nudges.js`'s existing notification system** (`settings.notificationsEnabled`
+  AND `Notification.permission === "granted"`) rather than adding a second,
+  separate opt-in toggle specifically for cooking timers. One global
+  notification preference is simpler for a single-owner app than a
+  per-feature settings matrix.

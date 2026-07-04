@@ -1,23 +1,21 @@
-// Single recipe view + basic cooking mode: live servings scaling, tap-to-check
-// ingredients, tap-to-highlight steps. Wake-lock and running timers are
-// deferred to Phase 6e per RECIPES_MODULE_PLAN's own build order — this
-// phase only needs the recipe to be genuinely cookable from, not hands-free.
-import { getRecipe, saveRecipe, deleteRecipe, listRecipeImages, listRecipes, saveMealPlan } from "../db.js";
+// Single recipe view + cooking mode: live servings scaling, tap-to-check
+// ingredients, tap-to-highlight steps, tap-to-start step timers, and a
+// screen wake-lock while the view is open (degrades silently if
+// unsupported — there's no fallback UI, per BUILD_GUIDE's "AI/enhancement
+// features fail soft" principle applied here to a hardware API instead).
+import { getRecipe, saveRecipe, deleteRecipe, listRecipeImages, listRecipes, saveMealPlan, getSettings } from "../db.js";
 import { buildRecipeForm } from "../recipe-form.js";
-import { formatAmount, scaleAmount, todayLocalDate, mondayOf, escapeHtml } from "../utils.js";
+import { formatAmount, scaleAmount, todayLocalDate, mondayOf, escapeHtml, blobToDataURL } from "../utils.js";
 import { loadOrCreateMealPlan } from "../meal-plan-helpers.js";
+import { downloadFullRecipeHtml } from "../recipe-export.js";
+import { createTimerController } from "../cook-timer.js";
+import { notify } from "../nudges.js";
 import { showToast } from "../toast.js";
 
 function confidenceMark(c) {
   if (c === "verified") return "✓ verified";
   if (c === "ai_estimate") return "~ estimate";
   return "? unknown";
-}
-
-function formatTimer(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `⏱ ${m}:${String(s).padStart(2, "0")}`;
 }
 
 export async function render(container, params) {
@@ -33,6 +31,40 @@ export async function render(container, params) {
   const checkedIngredients = new Set();
   let activeStepId = null;
   let photoObjectUrls = [];
+  const timerController = createTimerController(container);
+
+  let wakeLockSentinel = null;
+  async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request("screen");
+    } catch {
+      // Unsupported, denied, or page not visible — degrade silently.
+    }
+  }
+  function releaseWakeLock() {
+    wakeLockSentinel?.release().catch(() => {});
+    wakeLockSentinel = null;
+  }
+  // Browsers auto-release the lock when the tab is hidden and don't
+  // reacquire it automatically — re-request once the page is visible again.
+  function handleVisibilityChange() {
+    if (document.visibilityState === "visible") acquireWakeLock();
+  }
+
+  async function onTimerComplete(step) {
+    showToast(`Timer done: ${step.title || recipe.title}`, { type: "success", duration: 8000 });
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    const settings = await getSettings();
+    if (settings.notificationsEnabled && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      await notify("Timer done", step.title ? `${step.title} — ${recipe.title}` : recipe.title, "cook-timer");
+    }
+  }
+
+  if (recipe) {
+    acquireWakeLock();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
 
   paint();
 
@@ -106,12 +138,21 @@ export async function render(container, params) {
         <button class="btn sm primary" id="add-to-plan">Add to plan</button>
         <button class="btn sm" id="mark-cooked">Mark as cooked</button>
         <button class="btn sm ghost" id="edit-recipe">Edit</button>
+        <button class="btn sm ghost" id="export-recipe">Export recipe (HTML)</button>
         <button class="btn sm danger" id="delete-recipe">Delete</button>
       </div>
     `;
     wrap.querySelector("#add-to-plan").addEventListener("click", () => {
       addingToPlan = !addingToPlan;
       paint();
+    });
+    wrap.querySelector("#export-recipe").addEventListener("click", async () => {
+      let imageDataUrl;
+      if (images.length) {
+        const primary = images.find((img) => img.isPrimary) || images[0];
+        imageDataUrl = await blobToDataURL(primary.blob);
+      }
+      downloadFullRecipeHtml(recipe, { imageDataUrl });
     });
     wrap.querySelector("#mark-cooked").addEventListener("click", async () => {
       recipe = await saveRecipe({
@@ -251,10 +292,12 @@ export async function render(container, params) {
       row.innerHTML = `
         <div class="row between">
           <strong>${i + 1}. ${escapeHtml(step.title || "")}</strong>
-          ${step.timerSeconds ? `<span class="badge">${formatTimer(step.timerSeconds)}</span>` : ""}
+          <span class="timer-slot"></span>
         </div>
         <p>${escapeHtml(step.text)}</p>
       `;
+      const timerBadge = timerController.buildBadge(step, onTimerComplete);
+      if (timerBadge) row.querySelector(".timer-slot").appendChild(timerBadge);
       row.addEventListener("click", () => {
         activeStepId = active ? null : step.id;
         paint();
@@ -307,5 +350,8 @@ export async function render(container, params) {
 
   return () => {
     for (const url of photoObjectUrls) URL.revokeObjectURL(url);
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
+    releaseWakeLock();
+    timerController.destroy();
   };
 }

@@ -8,7 +8,7 @@ import { loadOrCreateMealPlan } from "../meal-plan-helpers.js";
 import { overridesToMap } from "../aisle.js";
 import { buildGroceryCard } from "../grocery-ui.js";
 import { showToast } from "../toast.js";
-import { downloadRecipeHtml } from "../recipe-export.js";
+import { downloadRecipeHtml, downloadFullRecipeHtml } from "../recipe-export.js";
 
 const PREP_METHODS = ["grill", "smoker", "stove", "oven", "none"];
 
@@ -199,7 +199,10 @@ export async function render(container) {
         showToast("Saved as template", { type: "success" });
         paint();
       });
-      row.querySelector(".export-recipe").addEventListener("click", () => downloadRecipeHtml(meal));
+      row.querySelector(".export-recipe").addEventListener("click", () => {
+        if (recipe) downloadFullRecipeHtml(recipe);
+        else downloadRecipeHtml(meal);
+      });
       list.appendChild(row);
     });
 
