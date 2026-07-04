@@ -333,3 +333,116 @@ testing hits the same confusion.
   — see [plan.js](js/views/plan.js) and [today.js](js/views/today.js). Not
   re-verified here since they're unrelated to this phase's changes and were
   already covered in the Phase 2 test pass.
+
+## Phase 6a specific checks (Recipe library — data + manual path)
+
+Verified live in the preview browser this session:
+
+- [x] **DB migration v2 → v3**: `recipes` and `recipe_images` stores added
+      via `contains()`-guarded creation; existing v2 data (profile,
+      exercises, meal_templates, etc.) survived the upgrade untouched.
+- [x] **Meal template → recipe migration**: saved a meal template, forced
+      `settings.recipesMigrated = false`, ran `migrateMealTemplatesToRecipes()`
+      — produced a starter recipe with matching title/prepMethod/macros and
+      confidence `unknown`; a second call was a correct no-op (idempotent,
+      gated on the settings flag rather than "recipes store is empty").
+- [x] **Manual entry → create**: filled title, description, base servings,
+      one ingredient row, one step, kcal/protein, a free-typed category
+      chip ("smoker"), prep method, and a 4-star rating; Save navigated
+      straight to the new recipe's detail view with everything persisted
+      correctly, nutrition confidence auto-flipped to `verified` (non-zero
+      values were entered).
+- [x] **Scaling**: bumped servings 4 → 6 on the detail view; "2 lb pork
+      shoulder" correctly rescaled to "3 lb pork shoulder" live
+      (`formatAmount`/`scaleAmount` in utils.js).
+- [x] **Cook-mode basics**: tapping an ingredient row toggles a
+      checked/strikethrough state that survives re-renders; tapping a step
+      card toggles its highlighted (ember) background. Both are ephemeral
+      per view-visit, not persisted — expected, since these are cooking-session
+      UI state, not recipe data.
+- [x] **Mark as cooked**: increments `timesCooked` and stamps
+      `lastCookedAt`; library card immediately shows a "cooked 1×" badge.
+- [x] **Edit**: the same form (`recipe-form.js`) reopens fully pre-filled
+      (title, servings, category chip, prep method, ingredient/step rows,
+      nutrition with its current confidence) for both the library's inline
+      "Manual" flow and the detail view's "Edit" button.
+- [x] **Delete**: removes the recipe and its associated `recipe_images`
+      records (verified via direct `db.js` calls), then returns to the
+      library.
+- [x] **Export → import round-trip including a photo**: attached a
+      synthetic image Blob via `saveRecipeImage`, exported (confirmed the
+      blob serializes to a `data:image/png;base64,...` string in the JSON),
+      then imported that same export — the recipe came back intact and the
+      image came back as a real `Blob` of the original byte size, and
+      rendered correctly in the detail view's photo gallery.
+- [x] Library search/filter/sort (title+ingredient+category search, category
+      chips, prep-method chips, sort dropdown) all update the list live with
+      no console errors.
+- [x] No console errors across Recipes (library), Recipe (detail/edit), or
+      the Meals-tab "Recipe library" entry card during the full flow above.
+
+Not yet exercised: a real photo file upload through the `<input type="file">`
+(only a synthetic Blob was pushed directly through `db.js`, since simulating
+a native file picker isn't reachable from the browser automation used this
+session) — the downscale/store code path itself is simple enough (canvas →
+`toBlob` → `saveRecipeImage`) that this is a reasonable gap to leave for the
+owner's first real use.
+
+## Known deviations from BUILD_GUIDE / RECIPES_MODULE_PLAN (Phase 6a)
+
+- **Only the Manual intake path is wired up.** The "+ Add Recipe" chooser
+  shows all four options (Manual, From URL, From Photo, Paste/Import) per
+  the UX spec, but the latter three just toast "coming in a later phase" —
+  they need the Sonnet/Haiku extraction pipeline, which
+  RECIPES_MODULE_PLAN's own build order (§6) schedules as Phase 6b. Building
+  them now would mean designing the AI contract twice.
+- **No "Estimate nutrition" (Haiku) button on the manual form.**
+  RECIPES_MODULE_PLAN §3 lists this under the manual-entry intake path, but
+  it needs the same 6b extraction/estimation plumbing as the other AI
+  paths. Manual entry in 6a is fully usable offline without it — nutrition
+  confidence is computed locally instead: `unknown` if all four macro
+  fields are zero, `verified` if the owner filled in any of them (matches
+  the "editing flips confidence to verified" rule in §5, since there's no
+  AI-estimate state reachable yet).
+- **Meal-template migration confidence is always `unknown`, never
+  `verified` or `ai_estimate`, regardless of whether the template already
+  had non-zero macros.** `meal_templates` records never recorded whether
+  their macros were hand-typed or copied from an earlier AI estimate
+  (Phase 4's `log_meal_estimate` results only tag `meal_logs` entries with
+  `source: "ai"`, not templates), so `unknown` is the only honest choice —
+  presuming `verified` would overstate confidence in numbers of unknown
+  origin.
+- **Migration is gated on `settings.recipesMigrated`, not "recipes store is
+  empty".** An empty-store check would silently re-import old meal
+  templates as recipes if the owner ever deleted every recipe they'd
+  created since the upgrade. The settings flag makes it a true one-time
+  migration.
+- **Cooking mode has no wake-lock and no running/tappable timers.**
+  RECIPES_MODULE_PLAN's own build order (§6) puts "cooking mode
+  wake-lock/timers" in Phase 6e, grouped together since both are about
+  making cooking mode hands-free. Steps with a `timerSeconds` value show a
+  static `⏱ m:ss` badge in 6a; tapping to start a countdown is deferred.
+- **No "Add to plan" button on the recipe detail view.** Linking a recipe
+  into a day's meal plan (with servings → auto-macros) is Phase 6c's
+  integration work (`recipeId` on meal-plan entries); building a button
+  that writes to `meal_plans` now would duplicate that work under a
+  different shape.
+- **Grocery-list ingredient aggregation isn't wired to recipes yet.** The
+  Meals tab's grocery list is still the flat manual list from Phase 2;
+  consolidating structured recipe ingredients into it is explicitly Phase
+  6c scope (RECIPES_MODULE_PLAN §2, "Integration changes to existing
+  stores").
+- **Duplicate-ID bug caught during manual testing, not by inspection.**
+  The recipe library's filter toolbar and the embedded recipe form both
+  originally used `#cat-chips`/`#prep-chips` as element IDs. Because each
+  file scopes its own `querySelector` calls to its own root element, the
+  app still worked correctly, but it was invalid HTML and broke an
+  ID-based lookup during testing. Fixed by prefixing every form-internal
+  ID in `recipe-form.js` with `rf-` (`#rf-cat-chips`, `#rf-prep-chips`,
+  `#rf-ingredient-rows`, etc.).
+- **The dev preview's service worker silently served a stale cached
+  `recipe-form.js` after an edit**, because `sw.js` caches the app shell
+  cache-first. Not an app bug, but worth noting for future testing
+  sessions: after editing any file already cached by a running SW,
+  unregister the SW and clear caches (or bump `CACHE_VERSION`, done here to
+  `v6`) before trusting a reload to reflect new source.

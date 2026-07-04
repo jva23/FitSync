@@ -95,6 +95,21 @@ export function isToday(dateStr) {
   return dateStr === todayLocalDate();
 }
 
+// Recipe scaling: rounds a scaled ingredient amount to 2 decimal places and
+// strips trailing zeros, so scaling 4 -> 6 servings prints "1.5" instead of
+// "1.500000001". No fraction-glyph conversion — plain decimals are legible
+// enough and avoid inventing a fraction-formatting system.
+export function formatAmount(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "";
+  const rounded = Math.round(n * 100) / 100;
+  return String(rounded);
+}
+
+export function scaleAmount(amount, baseServings, targetServings) {
+  if (!amount || !baseServings) return amount;
+  return (amount * targetServings) / baseServings;
+}
+
 // Suggests a barbell plate-loading breakdown per side. A helper, not an
 // enforcement — the lifter can always load whatever they actually have.
 export function plateMath(targetWeight, barWeight = 45, availablePlates = [45, 35, 25, 10, 5, 2.5]) {

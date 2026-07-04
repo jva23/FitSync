@@ -26,6 +26,8 @@ const VIEW_MODULES = {
   log: "./views/workout-log.js",
   review: "./views/review.js",
   "ai-events": "./views/ai-events.js",
+  recipes: "./views/recipes.js",
+  recipe: "./views/recipe-detail.js",
 };
 
 const TITLES = {
@@ -40,6 +42,8 @@ const TITLES = {
   log: "Log Workout",
   review: "Weekly Review",
   "ai-events": "AI Activity",
+  recipes: "Recipes",
+  recipe: "Recipe",
 };
 
 // Routes that hide the tab bar and swap the gear icon for a back button,

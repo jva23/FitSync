@@ -10,12 +10,11 @@
         "Bypass",
         "-File",
         "C:\\Users\\jvana\\AppData\\Local\\Temp\\claude\\C--Users-jvana-Claude\\2aba0061-6fdf-4e39-acb5-8013e68d2788\\scratchpad\\serve.ps1",
-        "-Port",
-        "8080",
         "-Root",
         "C:\\Users\\jvana\\Claude"
       ],
-      "port": 8080
+      "port": 8080,
+      "autoPort": true
     }
   ]
 }

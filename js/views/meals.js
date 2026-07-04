@@ -51,6 +51,7 @@ export async function render(container) {
 
   function paint() {
     container.innerHTML = "";
+    container.appendChild(recipeLibraryLink());
     container.appendChild(weekNav());
     container.appendChild(targetsCard());
     container.appendChild(templatesCard());
@@ -59,6 +60,20 @@ export async function render(container) {
       container.appendChild(dayCard(day));
     }
     container.appendChild(groceryCard());
+  }
+
+  function recipeLibraryLink() {
+    const wrap = document.createElement("div");
+    wrap.className = "card row between";
+    wrap.innerHTML = `
+      <div>
+        <div class="section-title" style="margin:0;">Recipe library</div>
+        <p class="hint" style="margin:0;">Store, scale, and cook from full recipes.</p>
+      </div>
+      <button class="btn sm" id="open-recipes">Open</button>
+    `;
+    wrap.querySelector("#open-recipes").addEventListener("click", () => (location.hash = "#/recipes"));
+    return wrap;
   }
 
   function weekNav() {

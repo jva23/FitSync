@@ -5,7 +5,7 @@ import { emit, state } from "./state.js";
 import { EXERCISE_SEED } from "./seed/exercises.js";
 
 const DB_NAME = "fitsync";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORES = [
   "profile",
@@ -19,6 +19,8 @@ const STORES = [
   "meal_logs",
   "ai_events",
   "meal_templates",
+  "recipes",
+  "recipe_images",
 ];
 
 let dbPromise;
@@ -54,6 +56,12 @@ function getDB() {
         }
         if (!db.objectStoreNames.contains("meal_templates")) {
           db.createObjectStore("meal_templates", { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains("recipes")) {
+          db.createObjectStore("recipes", { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains("recipe_images")) {
+          db.createObjectStore("recipe_images", { keyPath: "id" }).createIndex("recipeId", "recipeId");
         }
       },
     });
@@ -114,6 +122,7 @@ const DEFAULT_SETTINGS = {
   notificationsEnabled: false,
   persistentStorage: false,
   lastExportAt: null,
+  recipesMigrated: false,
 };
 
 export async function getSettings() {
@@ -323,6 +332,102 @@ export async function deleteMealTemplate(id) {
   emit("meal_templates:changed", null);
 }
 
+// ---- Recipes ----
+export async function listRecipes() {
+  return listRecords("recipes");
+}
+
+export async function getRecipe(id) {
+  const db = await getDB();
+  return (await db.get("recipes", id)) || null;
+}
+
+export async function saveRecipe(recipe) {
+  const stamped = await putRecord("recipes", {
+    categories: [],
+    ingredients: [],
+    steps: [],
+    prepMethod: "none",
+    times: {},
+    nutritionPerServing: { kcal: 0, protein: 0, carbs: 0, fat: 0, confidence: "unknown" },
+    notes: "",
+    rating: null,
+    timesCooked: 0,
+    lastCookedAt: null,
+    ...recipe,
+  });
+  emit("recipes:changed", stamped);
+  return stamped;
+}
+
+export async function deleteRecipe(id) {
+  const images = await listRecipeImages(id);
+  const db = await getDB();
+  const tx = db.transaction(["recipes", "recipe_images"], "readwrite");
+  await tx.objectStore("recipes").delete(id);
+  for (const img of images) await tx.objectStore("recipe_images").delete(img.id);
+  await tx.done;
+  emit("recipes:changed", null);
+}
+
+// ---- Recipe images (Blobs; kept in their own store so `recipes` stays lean) ----
+export async function listRecipeImages(recipeId) {
+  const db = await getDB();
+  return db.getAllFromIndex("recipe_images", "recipeId", recipeId);
+}
+
+export async function saveRecipeImage(image) {
+  const stamped = await putRecord("recipe_images", image);
+  emit("recipe_images:changed", stamped);
+  return stamped;
+}
+
+export async function deleteRecipeImage(id) {
+  await deleteRecord("recipe_images", id);
+  emit("recipe_images:changed", null);
+}
+
+// One-time migration: existing meal templates (Phase 5) become starter
+// recipes so the owner's saved dishes appear in the new library after the
+// upgrade, rather than leaving two disconnected "save a meal" concepts.
+// Gated on settings.recipesMigrated (not "recipes store is empty") so it
+// stays a true one-time migration even if the owner later deletes every
+// recipe they've created since.
+export async function migrateMealTemplatesToRecipes() {
+  const settings = await getSettings();
+  if (settings.recipesMigrated) return;
+  const templates = await listMealTemplates();
+  for (const tpl of templates) {
+    await saveRecipe({
+      title: tpl.name,
+      description: tpl.description || "",
+      source: { type: "manual", sourceName: "Migrated from meal template", importedAt: nowISO() },
+      categories: [],
+      baseServings: 1,
+      ingredients: [],
+      steps: [],
+      prepMethod: tpl.prepMethod || "none",
+      times: {},
+      // Meal templates never recorded whether their macros were hand-typed
+      // or came from an earlier AI estimate, so "unknown" is the honest
+      // confidence here rather than presuming "verified".
+      nutritionPerServing: {
+        kcal: tpl.macros?.kcal || 0,
+        protein: tpl.macros?.protein || 0,
+        carbs: tpl.macros?.carbs || 0,
+        fat: tpl.macros?.fat || 0,
+        confidence: "unknown",
+      },
+      notes: "",
+      rating: null,
+      timesCooked: 0,
+      lastCookedAt: null,
+      batchYield: tpl.batchTag || "",
+    });
+  }
+  await saveSettings({ recipesMigrated: true });
+}
+
 // ---- AI audit log (ai_events) ----
 export async function saveAiEvent(event) {
   const stamped = await putRecord("ai_events", {
@@ -358,6 +463,7 @@ export async function loadAllIntoState() {
   state.equipment = equipment;
   state.programs = programs;
   state.exercises = exercises;
+  await migrateMealTemplatesToRecipes();
   state.ready = true;
   emit("state:ready", state);
   return state;
@@ -372,11 +478,33 @@ export async function requestPersistentStorage() {
 }
 
 // ---- Export / Import (the backup story) ----
+// recipe_images holds Blobs, which aren't JSON-serializable — round-trip
+// them through data: URLs on the way out and back on the way in.
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function dataURLToBlob(dataURL) {
+  const res = await fetch(dataURL);
+  return res.blob();
+}
+
 export async function exportAll({ includeApiKey = false } = {}) {
   const db = await getDB();
   const data = { exportedAt: nowISO(), version: DB_VERSION };
   for (const store of STORES) {
-    data[store] = await db.getAll(store);
+    const records = await db.getAll(store);
+    data[store] =
+      store === "recipe_images"
+        ? await Promise.all(
+            records.map(async (r) => (r.blob instanceof Blob ? { ...r, blob: await blobToDataURL(r.blob) } : r))
+          )
+        : records;
   }
   if (!includeApiKey) {
     data.settings = (data.settings || []).map((s) => ({ ...s, apiKey: "" }));
@@ -402,13 +530,25 @@ export async function importAll(data) {
   const error = validateImportShape(data);
   if (error) throw new Error(error);
 
+  // Convert recipe photo data: URLs back to Blobs before opening the
+  // transaction below — awaiting a non-IndexedDB async op (fetch) partway
+  // through an open IDB transaction risks the transaction auto-closing.
+  const prepared = { ...data };
+  if (Array.isArray(prepared.recipe_images)) {
+    prepared.recipe_images = await Promise.all(
+      prepared.recipe_images.map(async (rec) =>
+        typeof rec.blob === "string" ? { ...rec, blob: await dataURLToBlob(rec.blob) } : rec
+      )
+    );
+  }
+
   const db = await getDB();
   const previousSettings = await getSettings();
 
   const tx = db.transaction(STORES, "readwrite");
   await Promise.all(STORES.map((s) => tx.objectStore(s).clear()));
   for (const store of STORES) {
-    const records = Array.isArray(data[store]) ? data[store] : [];
+    const records = Array.isArray(prepared[store]) ? prepared[store] : [];
     for (const rec of records) {
       await tx.objectStore(store).put(rec);
     }
