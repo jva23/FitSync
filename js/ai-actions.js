@@ -12,9 +12,13 @@ import {
   getMealLogByDate,
   saveMealLog,
   deleteMealLog,
+  getRecipe,
+  saveRecipe,
+  deleteRecipe,
   saveAiEvent,
   getLatestAiEvent,
 } from "./db.js";
+import { normalizeRecipeDraft } from "./ai-recipes.js";
 import { mondayOf, weekISOFromMonday, weekDays } from "./utils.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -98,6 +102,11 @@ export function validateActions(actions, { allowedDates, allowedWeekISO } = {}) 
           const meals = action.meals.map((m) => ({
             name: String(m.name || "Meal"),
             description: String(m.description || ""),
+            // recipeId is only a format check here — it's resolved (and
+            // dropped if it doesn't match a real recipe) at apply time,
+            // since that's the first point with async DB access.
+            recipeId: typeof m.recipeId === "string" && m.recipeId.trim() ? m.recipeId.trim() : undefined,
+            servings: Number(m.servings) > 0 ? Number(m.servings) : undefined,
             macros: {
               kcal: num(m.macros?.kcal),
               protein: num(m.macros?.protein),
@@ -146,6 +155,15 @@ export function validateActions(actions, { allowedDates, allowedWeekISO } = {}) 
           valid.push({ type, text: String(action.text) });
           break;
         }
+        case "save_recipe": {
+          const recipe = normalizeRecipeDraft(action.recipe, {
+            type: "coach_generated",
+            importedAt: new Date().toISOString(),
+          });
+          if (!recipe.title) throw new Error("recipe has no title");
+          valid.push({ type, recipe });
+          break;
+        }
         default:
           throw new Error(`unknown action type "${type}"`);
       }
@@ -187,6 +205,11 @@ export async function describeAction(action) {
       return `${action.date}: log "${action.name}" (~${action.macros.kcal} kcal, ${action.confidence} confidence)`;
     case "add_note":
       return `Note: ${action.text}`;
+    case "save_recipe": {
+      const r = action.recipe;
+      const n = r.nutritionPerServing || {};
+      return `New recipe: ${r.title} (${r.ingredients.length} ingredient${r.ingredients.length === 1 ? "" : "s"}, ~${n.kcal || 0} kcal/serving)`;
+    }
     default:
       return JSON.stringify(action);
   }
@@ -259,7 +282,42 @@ export async function applyActions(validActions, { trigger, promptSummary } = {}
     return mealLogs.get(date).doc;
   }
 
+  const recipeCache = new Map(); // recipeId -> recipe | null, so a batch referencing the same recipe multiple times only fetches it once.
+  async function resolveRecipe(recipeId) {
+    if (!recipeId) return null;
+    if (!recipeCache.has(recipeId)) recipeCache.set(recipeId, await getRecipe(recipeId));
+    return recipeCache.get(recipeId);
+  }
+
+  // If a meal references a real recipe, its macros are computed from that
+  // recipe (nutritionPerServing x servings) rather than the model's own
+  // estimate — that's the whole point of linking it. An invalid/hallucinated
+  // recipeId is dropped silently and the meal falls back to the model's
+  // estimated macros, rather than failing the action.
+  async function resolveMeal(m) {
+    if (!m.recipeId) return m;
+    const recipe = await resolveRecipe(m.recipeId);
+    if (!recipe) {
+      const { recipeId, servings, ...rest } = m;
+      return rest;
+    }
+    const servings = m.servings || recipe.baseServings || 1;
+    const n = recipe.nutritionPerServing || {};
+    return {
+      ...m,
+      servings,
+      macros: {
+        kcal: Math.round((n.kcal || 0) * servings),
+        protein: Math.round((n.protein || 0) * servings),
+        carbs: Math.round((n.carbs || 0) * servings),
+        fat: Math.round((n.fat || 0) * servings),
+      },
+      prepMethod: recipe.prepMethod && PREP_METHODS.has(recipe.prepMethod) ? recipe.prepMethod : m.prepMethod,
+    };
+  }
+
   const noteTexts = [];
+  const createdRecipeIds = [];
 
   for (const action of validActions) {
     switch (action.type) {
@@ -325,7 +383,7 @@ export async function applyActions(validActions, { trigger, promptSummary } = {}
       case "set_meal_day": {
         const plan = await mealPlanFor(action.date);
         const day = plan.days.find((d) => d.date === action.date);
-        if (day) day.meals = action.meals;
+        if (day) day.meals = await Promise.all(action.meals.map(resolveMeal));
         break;
       }
       case "adjust_macro_targets": {
@@ -348,6 +406,11 @@ export async function applyActions(validActions, { trigger, promptSummary } = {}
         noteTexts.push(action.text);
         break;
       }
+      case "save_recipe": {
+        const saved = await saveRecipe(action.recipe);
+        createdRecipeIds.push(saved.id);
+        break;
+      }
     }
   }
 
@@ -359,6 +422,9 @@ export async function applyActions(validActions, { trigger, promptSummary } = {}
     workout_plans: [...plans.entries()].map(([weekISO, { before }]) => ({ weekISO, before })),
     meal_plans: [...mealPlans.entries()].map(([weekISO, { before }]) => ({ weekISO, before })),
     meal_logs: [...mealLogs.entries()].map(([date, { before }]) => ({ date, before })),
+    // A save_recipe action's "before" state is simply "didn't exist" — undo
+    // deletes the created recipe rather than restoring a prior version.
+    createdRecipeIds,
   };
 
   return saveAiEvent({
@@ -411,6 +477,9 @@ export async function undoLastAiEvent() {
       const current = await getMealLogByDate(date);
       if (current) await deleteMealLog(current.id);
     }
+  }
+  for (const recipeId of inverseSnapshot.createdRecipeIds || []) {
+    await deleteRecipe(recipeId);
   }
 
   await saveAiEvent({ ...latest, undone: true });

@@ -19,15 +19,18 @@ const ACTION_ENVELOPE_SPEC = `Respond with JSON only — no prose, no markdown f
     { "type": "replace_workout_day", "date": "YYYY-MM-DD", "focus": "Upper push", "exercises": [{ "exerciseName": "Incline DB Press", "sets": 4, "reps": "8-10", "targetWeight": "60 lb DBs", "notes": "" }] },
     { "type": "update_workout_day", "date": "YYYY-MM-DD", "changes": { "focus": "...", "addExercises": [], "removeExerciseNames": [], "setAdjustments": [] } },
     { "type": "mark_rest_day", "date": "YYYY-MM-DD", "reason": "..." },
-    { "type": "set_meal_day", "date": "YYYY-MM-DD", "meals": [{ "name": "", "description": "", "macros": { "kcal": 0, "protein": 0, "carbs": 0, "fat": 0 }, "prepMethod": "grill|smoker|stove|oven|none", "batchTag": "optional-string" }] },
+    { "type": "set_meal_day", "date": "YYYY-MM-DD", "meals": [{ "name": "", "description": "", "recipeId": "optional — id of an owned recipe from the snapshot's RECIPE LIBRARY", "servings": 1, "macros": { "kcal": 0, "protein": 0, "carbs": 0, "fat": 0 }, "prepMethod": "grill|smoker|stove|oven|none", "batchTag": "optional-string" }] },
     { "type": "adjust_macro_targets", "weekISO": "YYYY-Www", "targets": { "kcal": 0, "protein": 0, "carbs": 0, "fat": 0 }, "reason": "" },
     { "type": "log_meal_estimate", "date": "YYYY-MM-DD", "name": "short label", "macros": { "kcal": 0, "protein": 0, "carbs": 0, "fat": 0 }, "confidence": "high|medium|low", "assumptions": "portion assumptions in one line" },
-    { "type": "add_note", "text": "" }
+    { "type": "add_note", "text": "" },
+    { "type": "save_recipe", "recipe": { "title": "", "description": "", "baseServings": 4, "categories": [], "ingredients": [{ "amount": 0, "unit": "", "name": "", "prepNote": "" }], "steps": [{ "title": "", "text": "", "timerSeconds": 0 }], "prepMethod": "grill|smoker|stove|oven|none|mixed", "nutritionPerServing": { "kcal": 0, "protein": 0, "carbs": 0, "fat": 0, "confidence": "ai_estimate", "assumptions": "" }, "notes": "" } }
   ]
 }
-Only emit actions for days/things that actually change — prefer minimal diffs. "actions" may be an empty array if nothing needs to change.`;
+Only emit actions for days/things that actually change — prefer minimal diffs. "actions" may be an empty array if nothing needs to change. When a set_meal_day meal sets recipeId, its macros are computed automatically from that recipe's nutritionPerServing x servings — the macros field is only a fallback used if the id turns out invalid, so give your best estimate there too but don't worry about matching it exactly.`;
 
 export const PLANNING_SYSTEM_PROMPT = `You are a strength & nutrition coach for a single owner of this app. Plan ONLY with the equipment and program structure provided in the snapshot — never assume equipment that isn't listed as available. Respect stated injuries/constraints absolutely; never program around them. When generating meals, favor grill- and smoker-friendly, high-protein meals with Latin flavors (the owner cooks this way weekly), and use batchTag to link one prep across multiple days when it makes sense for batch-cooking.
+
+Before inventing a new meal, check the RECIPE LIBRARY in the snapshot — if an owned recipe already fits the day (goals, available equipment/prep method, macros), reuse it via set_meal_day's recipeId + servings instead of reinventing it, and name it in your rationale (e.g. "Tuesday: your smoked pork shoulder tacos, 2 servings"). When you do invent something new that's worth keeping — a solid batch-cook idea, something that fits the owner's flavors and equipment well — propose it as a save_recipe action alongside the plan so it joins the library for future weeks.
 
 Apply basic periodization awareness using the last 4 weeks of logs in the snapshot: if top-set weights or volume have been climbing for several consecutive weeks with no lighter week in between, consider proposing a deload (meaningfully reduced volume and/or intensity, e.g. -40-50% volume or a few weeks back on weight) rather than another progression, and say so explicitly in the rationale. Don't propose a deload just because one hasn't happened recently — only when the accumulated fatigue pattern actually suggests it.
 

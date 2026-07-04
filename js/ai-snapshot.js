@@ -6,8 +6,41 @@ import {
   getMealPlanByWeek,
   listWorkoutLogs,
   listMealLogs,
+  listRecipes,
 } from "./db.js";
 import { mondayOf, weekISOFromMonday, addDaysStr, todayLocalDate, kgToLb } from "./utils.js";
+
+const RECIPE_INDEX_CAP = 150;
+
+function formatRecipeIndexLine(r) {
+  const n = r.nutritionPerServing || {};
+  const cats = (r.categories || []).join(",") || "uncategorized";
+  return `- [${r.id}] ${r.title} (${cats}; ${r.prepMethod || "none"}; ${n.kcal || 0}kcal/${n.protein || 0}p per serving; rating ${r.rating || "none"}; cooked ${r.timesCooked || 0}x)`;
+}
+
+// Compact enough to stay under the snapshot's token budget even with a large
+// library: under the cap, list every recipe; over it, prioritize top-rated +
+// recently cooked (the ones actually worth reusing) plus a category-count
+// summary so the model still knows roughly what else exists.
+function buildRecipeIndex(recipes) {
+  if (recipes.length === 0) return "No recipes saved yet — propose save_recipe for anything worth keeping.";
+  if (recipes.length <= RECIPE_INDEX_CAP) {
+    return recipes.map(formatRecipeIndexLine).join("\n");
+  }
+  const topRated = [...recipes].sort((a, b) => (b.rating || 0) - (a.rating || 0)).slice(0, 50);
+  const recentlyCooked = [...recipes]
+    .filter((r) => r.lastCookedAt)
+    .sort((a, b) => (b.lastCookedAt || "").localeCompare(a.lastCookedAt || ""))
+    .slice(0, 50);
+  const merged = new Map();
+  for (const r of [...topRated, ...recentlyCooked]) merged.set(r.id, r);
+  const categoryCounts = new Map();
+  for (const r of recipes) {
+    for (const c of r.categories || []) categoryCounts.set(c, (categoryCounts.get(c) || 0) + 1);
+  }
+  const countsLine = [...categoryCounts.entries()].map(([c, n]) => `${c} (${n})`).join(", ") || "none";
+  return `${[...merged.values()].map(formatRecipeIndexLine).join("\n")}\n...and ${recipes.length - merged.size} more across categories: ${countsLine}`;
+}
 
 function summarizeWorkoutLog(log, exercisesById) {
   const parts = log.exercises.map((ex) => {
@@ -80,6 +113,9 @@ export async function buildSnapshot({ weekISO, note } = {}) {
 
   const availableExerciseNames = state.exercises.map((e) => e.name).join(", ");
 
+  const allRecipes = await listRecipes();
+  const recipeIndex = buildRecipeIndex(allRecipes);
+
   return `
 PROFILE
 Goals: ${profile.goals || "not set"}
@@ -104,6 +140,12 @@ ${planSummary}
 
 EXERCISE LIBRARY (use these names when possible; you may propose a new one if none fit)
 ${availableExerciseNames}
+
+RECIPE LIBRARY (prefer these over inventing a new meal when one fits the day —
+reference it in set_meal_day by its [id] as recipeId plus servings, and name
+it in your rationale, e.g. "Tuesday: your smoked pork shoulder tacos, 2
+servings". Propose save_recipe for a genuinely new dish worth keeping.)
+${recipeIndex}
 
 TODAY: ${today}
 ${note ? `NOTE FROM OWNER: ${note}` : ""}

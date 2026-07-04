@@ -703,3 +703,85 @@ yet; only manual planning (Meals tab, Today, recipe detail) does as of 6c.
   that against the recipe or clears `recipeId`. Not a regression — the
   same was already true of manually-entered meals — but worth noting if
   inline macro editing is added later.
+
+## Phase 6d specific checks (Recipe library — coach integration)
+
+Verified live this session — first via direct `ai-actions.js`/`ai-snapshot.js`
+calls (fast, precise checks of the new logic in isolation), then end-to-end
+through the real Plan tab UI with `window.fetch` intercepted to return a
+canned Anthropic-shaped response (same caveat as every other AI phase: no
+real API key in this environment, so model judgment/latency aren't verified,
+only the client-side pipeline).
+
+- [x] **`recipeIndex` in the snapshot**: `buildSnapshot()` now includes a
+      `RECIPE LIBRARY` section listing each owned recipe with its real `[id]`,
+      categories, prep method, per-serving macros, rating, and times cooked —
+      confirmed a real recipe's exact `[id]` appears verbatim (needed since
+      the model must echo it back in `recipeId`).
+- [x] **`save_recipe` validation + apply**: hand-built a batch with one
+      `save_recipe` action and two `set_meal_day` actions (one referencing a
+      real recipe by id, one with a deliberately bogus id) — `validateActions`
+      accepted all three with zero errors, `describeAction` produced `"New
+      recipe: New Coach Invention (1 ingredient, ~300 kcal/serving)"`, and
+      `applyActions` created the recipe in the library.
+- [x] **`recipeId` macro auto-override, valid case**: the meal referencing a
+      real 400-kcal/serving recipe at 2 servings had its macros silently
+      *replaced* with the recipe-derived 800/40/100/20 — overriding the
+      model's own (deliberately wrong, 999-everything) estimate — confirming
+      the recipe is the source of truth once linked, not just a label.
+- [x] **`recipeId` graceful fallback, invalid case**: the meal with a
+      nonexistent `recipeId` kept the model's own provided macros and had
+      `recipeId`/`servings` silently stripped, rather than failing the whole
+      action or the whole batch.
+- [x] **Undo removes the created recipe**: `undoLastAiEvent()` (both called
+      directly and via the real "Undo last AI change" button in AI Activity)
+      deleted the coach-created recipe entirely — a `save_recipe`'s "before"
+      state is "didn't exist," so undo means delete, not restore.
+- [x] **Full gate, end-to-end through the real UI**: Plan tab → "Generate
+      this week" (mocked response proposing `save_recipe` for a new "Grilled
+      Shrimp Bowl" recipe) → AI proposal overlay correctly showed the
+      rationale plus the `"New recipe: Grilled Shrimp Bowl..."` diff line →
+      Apply → the recipe appeared in `listRecipes()` with `source.type:
+      "coach_generated"` → confirmed it *also* now appears in a freshly
+      built snapshot, so the next planning call would see and could
+      reference it — completing "→ it appears in library and next week's
+      plan."
+- [x] **AI Activity log**: the applied event's diff lines render correctly
+      for the new action type (no special-casing needed — `describeAction`
+      is already called generically per action).
+- [x] No console errors across Plan, AI Activity, or a full clean reload
+      throughout.
+
+## Known deviations from BUILD_GUIDE / RECIPES_MODULE_PLAN (Phase 6d)
+
+- **`recipeId` resolution happens in `applyActions`, not `validateActions`.**
+  `validateActions` stays synchronous (matching every existing call site,
+  none of which currently await it) and only format-checks `recipeId`/
+  `servings`; the actual DB lookup — and the macro override or fallback it
+  drives — happens in `applyActions`, which was already async and already
+  the place other actions resolve refs (e.g. `exerciseName` → `exerciseId`
+  happens at validation time there since the exercise library is already
+  in memory via `state`, but recipes aren't kept in `state` the way
+  exercises are, so an async lookup was unavoidable and `applyActions` was
+  the natural place for it).
+- **`save_recipe` always creates a new recipe; it never matches/updates an
+  existing one by title.** RECIPES_MODULE_PLAN describes this action as
+  the coach "proposing to save any meal it invents" — always a new
+  invention, not editing something already owned (editing an owned recipe
+  already has its own path: the recipe detail view's Edit form). If the
+  model ever proposes a title that collides with an existing recipe, the
+  result is two similarly-named recipes rather than a silent merge —
+  acceptable for a personal single-user library the owner can tidy by hand.
+- **A `set_meal_day` meal with a valid `recipeId` inherits the recipe's
+  `prepMethod` (when it's one of the plan-day's allowed values), not the
+  model's own guess.** The model's `prepMethod` guess for a linked meal is
+  redundant once the real recipe is known, and could otherwise disagree
+  with it (e.g. model says "stove" for a recipe whose prep method is
+  actually "smoker"); the recipe's own value is authoritative. Recipes
+  with `prepMethod: "mixed"` fall back to the model's guess instead, since
+  "mixed" isn't in the meal-plan day's smaller prep-method enum.
+  Recipe-linked meals in the same action can't reference a recipe created
+  by a `save_recipe` action earlier in the *same* batch, since that
+  recipe's id doesn't exist until after the batch applies — by design;
+  see the 6d gate's own phrasing ("appears in library **and next week's
+  plan**," not "this week's plan").
