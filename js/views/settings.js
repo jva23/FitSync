@@ -221,7 +221,11 @@ export async function render(container) {
     wrap.innerHTML = `
       <div class="section-title">Anthropic API Key</div>
       <div class="card stack">
-        <p>Used directly from this device for AI features (Phase 4). Stored locally, never included in exports by default.</p>
+        <div class="row between">
+          <p>Powers meal estimates, plan generation, replans, and Coach.</p>
+          <span class="badge ${settings.apiKey ? "success" : "warning"}" id="key-status">${settings.apiKey ? "saved" : "not set"}</span>
+        </div>
+        <p class="hint">Create one at console.anthropic.com → API Keys, then paste it here. It's stored only on this device and left out of exports by default, so after a reinstall or import you'll need to paste it again.</p>
         <div class="field">
           <label for="api-key">API key</label>
           <input type="password" id="api-key" value="${settings.apiKey || ""}" placeholder="sk-ant-..." autocomplete="off" />
@@ -235,13 +239,20 @@ export async function render(container) {
     wrap.querySelector("#save-key").addEventListener("click", async () => {
       const value = wrap.querySelector("#api-key").value.trim();
       await saveSettings({ apiKey: value });
-      showToast("API key saved", { type: "success" });
+      setKeyStatus(Boolean(value));
+      showToast(value ? "API key saved" : "API key cleared", value ? { type: "success" } : undefined);
     });
     wrap.querySelector("#clear-key").addEventListener("click", async () => {
       wrap.querySelector("#api-key").value = "";
       await saveSettings({ apiKey: "" });
+      setKeyStatus(false);
       showToast("API key cleared");
     });
+    function setKeyStatus(saved) {
+      const badge = wrap.querySelector("#key-status");
+      badge.className = `badge ${saved ? "success" : "warning"}`;
+      badge.textContent = saved ? "saved" : "not set";
+    }
     return wrap;
   }
 

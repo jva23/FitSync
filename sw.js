@@ -1,6 +1,6 @@
 // Cache-first app shell. No server data to be network-first for — everything
 // lives in IndexedDB on-device. Bump CACHE_VERSION on every deploy.
-const CACHE_VERSION = "v10";
+const CACHE_VERSION = "v12";
 const CACHE_NAME = `fitsync-shell-${CACHE_VERSION}`;
 
 const APP_SHELL = [

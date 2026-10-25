@@ -9,6 +9,11 @@ const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
 export const SONNET_MODEL = "claude-sonnet-4-6";
 export const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 const TIMEOUT_MS = 60000;
+// A full-week plan (7 workouts + 21 meals + recipes) is a long JSON document;
+// it needs far more output room — and wall-clock time — than the 4000-token
+// default, or the reply is cut off mid-JSON and can't be parsed.
+const WEEK_MAX_TOKENS = 16000;
+const WEEK_TIMEOUT_MS = 240000;
 
 export class AiError extends Error {}
 
@@ -43,19 +48,37 @@ function stripFences(text) {
   return text.replace(/```json|```/g, "").trim();
 }
 
+// Models occasionally wrap the JSON in a sentence of prose. Try the whole
+// string first, then fall back to the outermost {...} span.
+function parseJSONLoose(text) {
+  const cleaned = stripFences(text);
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end <= start) throw err;
+    return JSON.parse(cleaned.slice(start, end + 1));
+  }
+}
+
 // `tools` (optional) is passed straight through to the API for server tools
 // like web_fetch. Those flows can interleave the tool call between text
 // blocks (a preliminary "I'll fetch that" followed by the real answer after
 // the fetch completes), so the *last* text block is Claude's actual answer —
 // not content[0], which would grab the preliminary text instead.
-export async function callClaude(model, systemPrompt, messages, { maxTokens = 4000, tools } = {}) {
+export async function callClaude(model, systemPrompt, messages, options = {}) {
+  return (await callClaudeRaw(model, systemPrompt, messages, options)).text;
+}
+
+async function callClaudeRaw(model, systemPrompt, messages, { maxTokens = 4000, tools, timeoutMs = TIMEOUT_MS } = {}) {
   const settings = await getSettings();
   if (!settings.apiKey) {
     throw new AiError("Add an API key in Settings to use AI features.");
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
   try {
     res = await fetch(ANTHROPIC_API, {
@@ -89,14 +112,19 @@ export async function callClaude(model, systemPrompt, messages, { maxTokens = 40
 
   const data = await res.json();
   const textBlocks = (data.content || []).filter((b) => b.type === "text");
-  return textBlocks.length ? textBlocks[textBlocks.length - 1].text : "";
+  return {
+    text: textBlocks.length ? textBlocks[textBlocks.length - 1].text : "",
+    truncated: data.stop_reason === "max_tokens",
+  };
 }
 
 export async function callClaudeForJSON(model, systemPrompt, messages, options = {}) {
-  let text = await callClaude(model, systemPrompt, messages, options);
+  let { text, truncated } = await callClaudeRaw(model, systemPrompt, messages, options);
   try {
-    return JSON.parse(stripFences(text));
+    return parseJSONLoose(text);
   } catch {
+    // A reply that hit the token ceiling will just be cut off again on retry.
+    if (truncated) throw new AiError("The AI's reply was too long and got cut off — try again, or ask for a smaller change.");
     const retryMessages = [
       ...messages,
       { role: "assistant", content: text },
@@ -105,11 +133,14 @@ export async function callClaudeForJSON(model, systemPrompt, messages, options =
         content: "That wasn't valid JSON. Respond with ONLY the JSON object described in the system prompt — no prose, no markdown fences.",
       },
     ];
-    text = await callClaude(model, systemPrompt, retryMessages, options);
+    ({ text, truncated } = await callClaudeRaw(model, systemPrompt, retryMessages, options));
     try {
-      return JSON.parse(stripFences(text));
+      return parseJSONLoose(text);
     } catch {
-      throw new AiError("AI response wasn't understood — try again.");
+      console.warn("Unparseable AI response:", text);
+      throw new AiError(truncated
+        ? "The AI's reply was too long and got cut off — try again, or ask for a smaller change."
+        : "AI response wasn't understood — try again.");
     }
   }
 }
@@ -126,7 +157,10 @@ export async function generateWeek({ weekISO, note } = {}) {
   const snapshot = await buildSnapshot({ weekISO: targetWeek, note });
   const instruction = `Generate a full workout and meal plan for week ${targetWeek}. If a plan already exists for it, treat this as a full regeneration; otherwise create a complete week from scratch.`;
   const messages = [{ role: "user", content: `${instruction}\n\n${snapshot}` }];
-  const parsed = await callClaudeForJSON(SONNET_MODEL, PLANNING_SYSTEM_PROMPT, messages);
+  const parsed = await callClaudeForJSON(SONNET_MODEL, PLANNING_SYSTEM_PROMPT, messages, {
+    maxTokens: WEEK_MAX_TOKENS,
+    timeoutMs: WEEK_TIMEOUT_MS,
+  });
   return normalizeResult(parsed);
 }
 
@@ -135,7 +169,10 @@ export async function replanWeek(trigger) {
   const snapshot = await buildSnapshot({ weekISO, note: trigger });
   const instruction = `The owner needs the remainder of the current week (from today onward) revised. Trigger: ${trigger}. Only emit actions for days that need to change.`;
   const messages = [{ role: "user", content: `${instruction}\n\n${snapshot}` }];
-  const parsed = await callClaudeForJSON(SONNET_MODEL, PLANNING_SYSTEM_PROMPT, messages);
+  const parsed = await callClaudeForJSON(SONNET_MODEL, PLANNING_SYSTEM_PROMPT, messages, {
+    maxTokens: 8000,
+    timeoutMs: 120000,
+  });
   return normalizeResult(parsed);
 }
 
