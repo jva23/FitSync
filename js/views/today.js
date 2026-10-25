@@ -8,6 +8,7 @@ import {
   listMealTemplates,
   saveMealTemplate,
   listRecipes,
+  saveSettings,
 } from "../db.js";
 import { showToast } from "../toast.js";
 import { kgToLb, mondayOf, weekISOFromMonday, todayLocalDate, ozToMl, mlToOz, escapeHtml } from "../utils.js";
@@ -29,10 +30,34 @@ export async function render(container) {
   const allRecipes = await listRecipes();
 
   container.innerHTML = "";
+  const hasKey = Boolean(state.settings?.apiKey);
+  if (!hasKey && !state.settings?.apiKeyNoticeDismissed) container.appendChild(apiKeyCard());
   container.appendChild(profileCard());
   container.appendChild(workoutCard());
   container.appendChild(mealsCard());
   container.appendChild(waterCard());
+
+  // Shown on a fresh install (or after a wipe) so the missing key is obvious
+  // instead of only surfacing when an AI button fails. "Not now" hides it for
+  // good; the meal quick-log keeps its own inline hint.
+  function apiKeyCard() {
+    const wrap = document.createElement("div");
+    wrap.className = "card stack";
+    wrap.innerHTML = `
+      <h2>Add your API key to turn on AI</h2>
+      <p>Meal estimates, plan generation, replans, and Coach need an Anthropic API key. Logging, planning, and progress all work without it.</p>
+      <div class="row">
+        <button class="btn ghost" id="dismiss-key-notice">Not now</button>
+        <button class="btn primary" id="go-key" style="flex:1;">Add API key</button>
+      </div>
+    `;
+    wrap.querySelector("#go-key").addEventListener("click", () => (location.hash = "#/settings"));
+    wrap.querySelector("#dismiss-key-notice").addEventListener("click", async () => {
+      wrap.remove();
+      await saveSettings({ apiKeyNoticeDismissed: true });
+    });
+    return wrap;
+  }
 
   function profileCard() {
     const wrap = document.createElement("div");
@@ -207,6 +232,7 @@ export async function render(container) {
         <input type="text" id="nl-food" placeholder="e.g. leftover entraña, two eggs, a tortilla" />
       </div>
       <button class="btn primary block" id="nl-estimate">Estimate with AI</button>
+      ${hasKey ? "" : `<p class="hint">AI estimates need an API key — <a href="#/settings">add one in Settings</a>, or log manually below.</p>`}
       <div id="nl-result"></div>
       ${allRecipes.length ? `
       <hr />
